@@ -1,0 +1,19 @@
+{
+  "name": "cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "orchestra": "./src/index.ts"
+  },
+  "scripts": {
+    "orchestra": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@orchestra/shared": "workspace:*",
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}

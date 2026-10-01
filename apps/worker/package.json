@@ -1,0 +1,21 @@
+{
+  "name": "worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@orchestra/agents": "workspace:*",
+    "@orchestra/database": "workspace:*",
+    "@orchestra/event-bus": "workspace:*",
+    "@orchestra/observability": "workspace:*",
+    "@orchestra/shared": "workspace:*",
+    "@orchestra/workflow-engine": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}
