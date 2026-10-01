@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@orchestra/shared": ["packages/shared/src/index.ts"],
+      "@orchestra/observability": ["packages/observability/src/index.ts"],
+      "@orchestra/database": ["packages/database/src/index.ts"],
+      "@orchestra/event-bus": ["packages/event-bus/src/index.ts"],
+      "@orchestra/workflow-engine": ["packages/workflow-engine/src/index.ts"],
+      "@orchestra/agents": ["packages/agents/src/index.ts"],
+      "@orchestra/integrations": ["packages/integrations/src/index.ts"],
+      "@orchestra/claude-code": ["packages/claude-code/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "apps/*/src/**/*.ts",
+    "apps/*/src/**/*.tsx",
+    "apps/*/vite.config.ts",
+    "vitest.config.ts"
+  ]
+}

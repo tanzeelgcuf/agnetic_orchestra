@@ -1,0 +1,44 @@
+# Default software-delivery workflow.
+#
+# Phase 1 wires this pipeline with noop agents to validate orchestration
+# mechanics end-to-end. Later phases replace the noop placements with real
+# agents: requirements (Phase 2), development via Claude Code (Phase 4),
+# review fan-out (Phase 5), quality gate (Phase 6), deployment (Phase 7).
+
+name: software-delivery
+description: Requirements -> development -> parallel review -> gate -> approval -> merge -> deploy -> verify
+
+stages:
+  - id: requirements
+    agent: noop-agent
+
+  - id: development
+    agent: noop-agent
+    depends_on: [requirements]
+
+  - id: reviews
+    type: parallel
+    parallel:
+      - noop-review-agent
+      - noop-security-agent
+    depends_on: [development]
+
+  - id: quality-gate
+    agent: noop-agent
+    depends_on: [reviews]
+
+  - id: human-approval
+    type: approval
+    depends_on: [quality-gate]
+
+  - id: merge
+    agent: noop-agent
+    depends_on: [human-approval]
+
+  - id: deployment
+    agent: noop-agent
+    depends_on: [merge]
+
+  - id: verification
+    agent: noop-agent
+    depends_on: [deployment]

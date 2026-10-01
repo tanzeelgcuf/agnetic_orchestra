@@ -1,0 +1,25 @@
+# Phase 1: Postgres backs the workflow state + event queue. The api/worker/web
+# run on the host via `make dev`; full-stack containerized dev (api, worker,
+# web, mock Jira/GitHub, observability) lands in a later phase.
+#
+# Host port 5433 (not 5432) to avoid clashing with other local Postgres
+# instances; CI's service container uses 5432 via DATABASE_URL.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: orchestra
+      POSTGRES_PASSWORD: orchestra
+      POSTGRES_DB: orchestra
+    ports:
+      - "5433:5432"
+    volumes:
+      - orchestra-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestra"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  orchestra-pgdata:
