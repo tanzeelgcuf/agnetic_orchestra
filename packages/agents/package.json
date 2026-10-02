@@ -9,6 +9,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@orchestra/shared": "workspace:*"
+    "@anthropic-ai/sdk": "^0.131.0",
+    "@orchestra/shared": "workspace:*",
+    "zod": "^3.25.76"
   }
 }

@@ -19,7 +19,10 @@ const ConfigSchema = z.object({
   logLevel: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace"])
     .default("info"),
-  logRedactPaths: z.array(z.string()).default(DEFAULT_REDACT_PATHS)
+  logRedactPaths: z.array(z.string()).default(DEFAULT_REDACT_PATHS),
+  jiraBaseUrl: z.string().url().optional(),
+  jiraEmail: z.string().email().optional(),
+  jiraApiToken: z.string().optional()
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
@@ -32,7 +35,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     workerPollIntervalMs: env.WORKER_POLL_INTERVAL_MS,
     workerBatchSize: env.WORKER_BATCH_SIZE,
     logLevel: env.LOG_LEVEL,
-    logRedactPaths: env.LOG_REDACT_PATHS?.split(",").map((s) => s.trim()).filter(Boolean)
+    logRedactPaths: env.LOG_REDACT_PATHS?.split(",").map((s) => s.trim()).filter(Boolean),
+    jiraBaseUrl: env.JIRA_URL,
+    jiraEmail: env.JIRA_EMAIL,
+    jiraApiToken: env.JIRA_TOKEN
   });
   if (!parsed.success) {
     throw new Error(`Invalid configuration: ${parsed.error.message}`);

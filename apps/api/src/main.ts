@@ -5,11 +5,14 @@ import { createDb, PgWorkflowStore } from "@orchestra/database";
 import { PostgresQueue } from "@orchestra/event-bus";
 import {
   AgentRegistry,
+  AnthropicLlmClient,
   DEFAULT_BLOCKING_RULES,
   NoopAgent,
   PolicyEngine,
+  RequirementsAgent,
   ToolRegistry
 } from "@orchestra/agents";
+import { JiraRestAdapter, registerJiraTools } from "@orchestra/integrations";
 import { loadWorkflows, WorkflowExecutor } from "@orchestra/workflow-engine";
 import { buildServer } from "./server";
 
@@ -26,11 +29,24 @@ async function main(): Promise<void> {
   const queue = new PostgresQueue(config.databaseUrl);
 
   const registry = new AgentRegistry();
+  const tools = new ToolRegistry();
+  const policy = new PolicyEngine(DEFAULT_BLOCKING_RULES);
+
+  if (config.jiraBaseUrl && config.jiraEmail && config.jiraApiToken) {
+    const jira = new JiraRestAdapter(config.jiraBaseUrl, config.jiraEmail, config.jiraApiToken);
+    registerJiraTools(tools, jira);
+    logger.info("jira tools registered (REST adapter)");
+  } else {
+    logger.info(
+      "jira not configured (JIRA_URL/JIRA_EMAIL/JIRA_TOKEN unset) — jira tools unavailable"
+    );
+  }
+
+  const llm = process.env.ANTHROPIC_API_KEY ? new AnthropicLlmClient() : undefined;
+  registry.register(new RequirementsAgent(llm));
   registry.register(new NoopAgent());
   registry.register(new NoopAgent("noop-review-agent", "Noop Review Agent"));
   registry.register(new NoopAgent("noop-security-agent", "Noop Security Agent"));
-  const tools = new ToolRegistry();
-  const policy = new PolicyEngine(DEFAULT_BLOCKING_RULES);
 
   const definitions = loadWorkflows(
     fileURLToPath(new URL("../../../workflows", import.meta.url)),
