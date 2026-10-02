@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { NotFoundError, OrchestraError, ValidationError } from "@orchestra/shared";
 import type { AppConfig, WorkflowStore } from "@orchestra/shared";
@@ -7,6 +8,9 @@ import type { Logger } from "@orchestra/observability";
 import type { TaskQueue } from "@orchestra/event-bus";
 import type { AgentRegistry } from "@orchestra/agents";
 import type { WorkflowExecutor } from "@orchestra/workflow-engine";
+import type { WebhookDeliveryStore } from "@orchestra/database";
+import type { GitHubWebhookHandler } from "@orchestra/integrations";
+import { verifyWebhookSignature, parseGitHubWebhook } from "@orchestra/integrations";
 
 export interface ServerDeps {
   config: AppConfig;
@@ -15,6 +19,10 @@ export interface ServerDeps {
   queue: TaskQueue;
   registry: AgentRegistry;
   executor: WorkflowExecutor;
+  /** Deduplicating store for inbound webhook deliveries. */
+  webhooks?: WebhookDeliveryStore;
+  /** Handlers invoked for verified, deduplicated webhook events. */
+  webhookHandlers?: GitHubWebhookHandler[];
 }
 
 const CreateWorkflowSchema = z.object({
@@ -29,6 +37,8 @@ const ApproveSchema = z.object({
   note: z.string().optional()
 });
 
+type FastifyRequestWithRawBody = { rawBody?: string };
+
 export async function buildServer(deps: ServerDeps) {
   const app = Fastify({
     loggerInstance: deps.logger,
@@ -36,10 +46,22 @@ export async function buildServer(deps: ServerDeps) {
   });
   await app.register(cors, { origin: true });
 
-  // Auth: bearer token on everything except /health. Phase 1 mechanism
-  // (ADR-006); JWT/OIDC lands in Phase 8.
+  // Capture the raw body for webhook signature verification while keeping the
+  // parsed object available to every JSON route.
+  app.addContentTypeParser<string>("application/json", { parseAs: "string" }, (_req, body, done) => {
+    try {
+      (_req as FastifyRequestWithRawBody).rawBody = body;
+      done(null, JSON.parse(body));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
+  // Auth: bearer token on everything except /health (and the webhook route,
+  // which GitHub calls and which authenticates via HMAC signature instead).
+  // Phase 1 mechanism (ADR-006); JWT/OIDC lands in Phase 8.
   app.addHook("onRequest", async (req, reply) => {
-    if (req.url === "/health" || req.method === "OPTIONS") return;
+    if (req.url === "/health" || req.method === "OPTIONS" || req.url === "/webhooks/github") return;
     const header = req.headers.authorization ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
     if (token.length === 0 || token !== deps.config.apiToken) {
@@ -62,6 +84,67 @@ export async function buildServer(deps: ServerDeps) {
   });
 
   app.get("/health", async () => ({ status: "ok" }));
+
+  // Inbound GitHub webhooks. Verified by HMAC-SHA256 when
+  // GITHUB_WEBHOOK_SECRET is set; unsigned accepted only when unset (dev).
+  // Deduplicated by X-GitHub-Delivery id; audited; dispatched to handlers.
+  app.post("/webhooks/github", async (req, reply) => {
+    const rawBody = (req as FastifyRequestWithRawBody).rawBody ?? JSON.stringify(req.body ?? {});
+    const eventName = asHeader(req.headers["x-github-event"]);
+    const deliveryId = asHeader(req.headers["x-github-delivery"]) ?? randomUUID();
+    const signature = asHeader(req.headers["x-hub-signature-256"]);
+
+    const secret = deps.config.githubWebhookSecret;
+    if (secret) {
+      if (!eventName || !verifyWebhookSignature(rawBody, signature, secret)) {
+        return await reply.code(401).send({ error: "invalid_signature" });
+      }
+    } else if (!eventName) {
+      return await reply.code(400).send({ error: "missing x-github-event header" });
+    }
+
+    const payload = (req.body ?? {}) as Record<string, unknown>;
+    const parsed = parseGitHubWebhook(eventName ?? "unknown", payload);
+
+    const delivery = deps.webhooks
+      ? await deps.webhooks.recordDelivery({
+          source: "github",
+          deliveryId,
+          event: parsed.kind,
+          action: parsed.action,
+          payload
+        })
+      : { isNew: true };
+    if (!delivery.isNew) {
+      return await reply.code(200).send({ ok: true, duplicate: true });
+    }
+
+    await deps.store.appendAudit(
+      "github-webhook",
+      `${parsed.kind}.${parsed.action ?? "event"}`,
+      parsed.repository
+        ? `repo/${parsed.repository.owner}/${parsed.repository.name}`
+        : "github",
+      { deliveryId, issueKey: parsed.issueKey ?? null }
+    );
+
+    for (const handler of deps.webhookHandlers ?? []) {
+      try {
+        await handler.handle({ event: parsed, deliveryId, raw: payload });
+      } catch (e) {
+        // Handler errors must not 500 the webhook: GitHub would retry and the
+        // delivery dedup would swallow the retry without re-running handlers.
+        deps.logger.warn({ err: e, handler: handler.name, deliveryId }, "webhook handler failed");
+      }
+    }
+
+    return await reply.code(200).send({
+      ok: true,
+      kind: parsed.kind,
+      action: parsed.action,
+      issueKey: parsed.issueKey
+    });
+  });
 
   app.post("/workflows", async (req, reply) => {
     const parsed = CreateWorkflowSchema.safeParse(req.body);
@@ -171,4 +254,9 @@ export async function buildServer(deps: ServerDeps) {
   });
 
   return app;
+}
+
+function asHeader(value: unknown): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return typeof value === "string" ? value : undefined;
 }

@@ -14,6 +14,8 @@ import {
 } from "@orchestra/agents";
 import { JiraRestAdapter, registerJiraTools } from "@orchestra/integrations";
 import { loadWorkflows, WorkflowExecutor } from "@orchestra/workflow-engine";
+import { PgWebhookStore } from "@orchestra/database";
+import { WorkflowTriggerHandler } from "./webhooks";
 import { buildServer } from "./server";
 
 async function main(): Promise<void> {
@@ -62,7 +64,21 @@ async function main(): Promise<void> {
     definitions
   });
 
-  const app = await buildServer({ config, logger, store, queue, registry, executor });
+  const app = await buildServer({
+    config,
+    logger,
+    store,
+    queue,
+    registry,
+    executor,
+    webhooks: new PgWebhookStore(db),
+    webhookHandlers: [
+      new WorkflowTriggerHandler(
+        (definition, context) => executor.startRun(definition, context),
+        config.webhookTriggers
+      )
+    ]
+  });
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {

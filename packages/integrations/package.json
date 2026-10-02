@@ -9,6 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@octokit/rest": "^21.0.0",
     "@orchestra/agents": "workspace:*",
     "@orchestra/shared": "workspace:*"
   }

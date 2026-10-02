@@ -209,3 +209,25 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       .map((r) => ({ ...r }));
   }
 }
+
+/** In-memory double for the webhook delivery store (dedup by delivery id). */
+export class InMemoryWebhookStore {
+  readonly deliveries = new Map<string, { source: string; event: string; action?: string }>();
+
+  async recordDelivery(input: {
+    source: string;
+    deliveryId: string;
+    event: string;
+    action?: string;
+    payload?: Record<string, unknown>;
+  }): Promise<{ isNew: boolean }> {
+    const key = `${input.source}:${input.deliveryId}`;
+    if (this.deliveries.has(key)) return { isNew: false };
+    this.deliveries.set(key, { source: input.source, event: input.event, action: input.action });
+    return { isNew: true };
+  }
+
+  async hasDelivery(source: string, deliveryId: string): Promise<boolean> {
+    return this.deliveries.has(`${source}:${deliveryId}`);
+  }
+}

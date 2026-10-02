@@ -6,7 +6,8 @@ import {
   integer,
   jsonb,
   bigserial,
-  index
+  index,
+  uniqueIndex
 } from "drizzle-orm/pg-core";
 
 export const workflowRuns = pgTable("workflow_runs", {
@@ -89,3 +90,17 @@ export const auditEvents = pgTable("audit_events", {
   data: jsonb("data"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
+
+export const webhookDeliveries = pgTable(
+  "webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    source: text("source").notNull(),
+    deliveryId: text("delivery_id").notNull(),
+    event: text("event").notNull(),
+    action: text("action"),
+    payload: jsonb("payload"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [uniqueIndex("webhook_deliveries_source_idx").on(t.source, t.deliveryId)]
+);

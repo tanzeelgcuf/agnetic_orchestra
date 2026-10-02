@@ -5,7 +5,7 @@ implement → test → verify → document → commit. A phase is done only when
 tests, lint, typecheck, security considerations, documentation, and integration
 verification are all in place.
 
-## Phase 1 — Foundation  *(in progress — current build)*
+## Phase 1 — Foundation  *(complete — verified 2026-10-01)*
 
 - [x] Monorepo (pnpm workspaces), TypeScript strict, ESLint, Vitest, Makefile
 - [x] Shared domain model, config loading, errors (`packages/shared`)
@@ -21,19 +21,28 @@ verification are all in place.
 - [x] Web dashboard: workflows, timelines, approvals (`apps/web`)
 - [x] Docker Compose (postgres + api + worker + web), CI workflow
 
-## Phase 2 — Jira + Requirements Agent
+## Phase 2 — Jira + Requirements Agent  *(complete — verified 2026-10-02)*
 
-- [ ] Jira adapter (REST + MCP path) in `packages/integrations`
-- [ ] Requirements Agent: parse issues, identify ambiguity/missing acceptance criteria,
+- [x] Jira adapter (REST via Jira Cloud API v3 + ADF; MCP path via `McpAdapter` interface)
+      in `packages/integrations`
+- [x] Requirements Agent: parse issues, identify ambiguity/missing acceptance criteria,
       decompose epics → stories → tasks, write structured results back to Jira
-- [ ] Requirements approval gate in the default workflow
-- [ ] Mock Jira service for CI
+      (LLM reasoning via official Anthropic SDK with adaptive thinking, deterministic
+      heuristic fallback offline; untrusted-content defense)
+- [x] Requirements approval gate in the default workflow
+- [x] In-memory Jira double for CI (containerized mock service deferred — the adapter
+      interface keeps it swappable)
 
-## Phase 3 — GitHub integration
+## Phase 3 — GitHub integration  *(complete — verified 2026-10-02)*
 
-- [ ] GitHub adapter: repos, branches, commits, PRs, comments, checks, workflows
-- [ ] Inbound webhooks (`pull_request.*`, `workflow_run.completed`, `push`)
-- [ ] Repository access tokens scoped per project
+- [x] GitHub adapter (Octokit-backed): repos, branches, commits, PRs, comments,
+      checks + `InMemoryGitHubAdapter` for tests
+- [x] Inbound webhooks: HMAC-SHA256 signature verification, delivery dedup
+      (`webhook_deliveries`), event mapping (`pull_request.*`, `push`,
+      `workflow_run`, `deployment_status`), audit, configurable webhook→workflow
+      triggers
+- [x] Scoped secret resolution: `SecretProvider` (env-backed) + per-integration
+      config (GITHUB_TOKEN, GITHUB_WEBHOOK_SECRET, JIRA_*)
 
 ## Phase 4 — Claude Code execution
 

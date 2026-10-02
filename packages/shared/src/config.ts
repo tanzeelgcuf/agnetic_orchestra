@@ -22,7 +22,23 @@ const ConfigSchema = z.object({
   logRedactPaths: z.array(z.string()).default(DEFAULT_REDACT_PATHS),
   jiraBaseUrl: z.string().url().optional(),
   jiraEmail: z.string().email().optional(),
-  jiraApiToken: z.string().optional()
+  jiraApiToken: z.string().optional(),
+  githubToken: z.string().optional(),
+  /** HMAC-SHA256 secret for inbound GitHub webhooks. Unsigned requests are
+   * accepted only when this is unset (local dev); always set in production. */
+  githubWebhookSecret: z.string().optional(),
+  /** GitHub webhook action → workflow definition name, as JSON, e.g.
+   * {"pull_request.opened":"software-delivery"}. Empty by default. */
+  webhookTriggers: z
+    .preprocess((v) => {
+      if (typeof v !== "string" || v.length === 0) return {};
+      try {
+        return JSON.parse(v);
+      } catch {
+        return {};
+      }
+    }, z.record(z.string()))
+    .default({})
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
@@ -38,7 +54,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     logRedactPaths: env.LOG_REDACT_PATHS?.split(",").map((s) => s.trim()).filter(Boolean),
     jiraBaseUrl: env.JIRA_URL,
     jiraEmail: env.JIRA_EMAIL,
-    jiraApiToken: env.JIRA_TOKEN
+    jiraApiToken: env.JIRA_TOKEN,
+    githubToken: env.GITHUB_TOKEN,
+    githubWebhookSecret: env.GITHUB_WEBHOOK_SECRET,
+    webhookTriggers: env.WEBHOOK_TRIGGERS
   });
   if (!parsed.success) {
     throw new Error(`Invalid configuration: ${parsed.error.message}`);
