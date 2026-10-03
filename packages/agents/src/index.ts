@@ -6,3 +6,5 @@ export * from "./noop";
 export * from "./llm";
 export * from "./requirements-agent";
 export * from "./development-agent";
+export * from "./review-agents";
+export * from "./review-domains";

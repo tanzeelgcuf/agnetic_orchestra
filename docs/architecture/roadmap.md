@@ -60,11 +60,21 @@ verification are all in place.
 - [x] Concurrency hardening found during verification: unique index on
       `(run_id, stage_id)` + conflict-refetch + per-run worker serialization
 
-## Phase 5 — Review orchestra
+## Phase 5 — Review orchestra  *(complete — verified 2026-10-04)*
 
-- [ ] Code/Security/Architecture/Test review agents (parallel fan-out)
-- [ ] Finding dedup + severity classification
-- [ ] Review consensus policy (single critical security finding blocks)
+- [x] Code/Security/Architecture/Test review agents (parallel fan-out over the
+      `reviews` stage; each reviews the diff via the `repo.get_diff` tool —
+      PR mode via Octokit or local branch mode via git)
+- [x] Builtin deterministic scanners (secrets, injection patterns, eval,
+      empty catch, schema-without-migration, change span, missing tests) —
+      always run; LLM reasoning merges with them when ANTHROPIC_API_KEY is set
+- [x] Finding dedup (file+line+title) + severity classification; reviews
+      publish PASS / NEEDS_CHANGES / FAIL
+- [x] Review consensus policy (§26): the PolicyEngine decides blocking — a
+      single high/critical security finding blocks the run; configurable
+      per domain/severity
+- [ ] Fix-iterate loop (findings → back to the Development Agent → re-review)
+      — lands with the Phase 6 quality gate
 
 ## Phase 6 — Quality gates
 

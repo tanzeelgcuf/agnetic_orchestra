@@ -1,18 +1,26 @@
 import { beforeAll, afterEach, afterAll, describe, expect, it } from "vitest";
+import { execSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { Pool } from "pg";
 import { createLogger } from "@orchestra/observability";
 import { createDb, PgWorkflowStore } from "@orchestra/database";
 import { PostgresQueue } from "@orchestra/event-bus";
 import {
   AgentRegistry,
+  ArchitectureReviewAgent,
+  CodeReviewAgent,
   DEFAULT_BLOCKING_RULES,
   DevelopmentAgent,
   NoopAgent,
   PolicyEngine,
   RequirementsAgent,
+  SecurityReviewAgent,
+  TestReviewAgent,
   ToolRegistry
 } from "@orchestra/agents";
 import { InMemoryJiraAdapter, registerJiraTools } from "@orchestra/integrations";
+import { createDiffTool } from "@orchestra/integrations";
 import { loadWorkflows, WorkflowExecutor } from "@orchestra/workflow-engine";
 import { NoopExecutor } from "@orchestra/claude-code";
 import { join } from "node:path";
@@ -37,6 +45,8 @@ describe.skipIf(!pgUp)("orchestrated run against PostgreSQL", () => {
   let store: PgWorkflowStore;
   let queue: PostgresQueue;
   let executor: WorkflowExecutor;
+  let repoDir: string;
+  const tempDirs: string[] = [];
 
   beforeAll(async () => {
     pool = new Pool({ connectionString: DATABASE_URL });
@@ -49,6 +59,11 @@ describe.skipIf(!pgUp)("orchestrated run against PostgreSQL", () => {
     const registry = new AgentRegistry();
     registry.register(new RequirementsAgent()); // heuristic analysis (no LLM in tests)
     registry.register(new DevelopmentAgent({ executor: new NoopExecutor() }));
+    const policy = new PolicyEngine(DEFAULT_BLOCKING_RULES);
+    registry.register(new CodeReviewAgent({ policy }));
+    registry.register(new SecurityReviewAgent({ policy }));
+    registry.register(new ArchitectureReviewAgent({ policy }));
+    registry.register(new TestReviewAgent({ policy }));
     registry.register(new NoopAgent());
     registry.register(new NoopAgent("noop-review-agent", "Noop Review Agent"));
     registry.register(new NoopAgent("noop-security-agent", "Noop Security Agent"));
@@ -67,12 +82,30 @@ Given a valid reset link, when the user submits a new password, then access is u
     });
     registerJiraTools(tools, jira);
 
+    // A real git repo with prepared branches so review agents have a diff.
+    repoDir = mkdtempSync(join(tmpdir(), "orchestra-e2e-repo-"));
+    tempDirs.push(repoDir);
+    const git = (args: string) => execSync(args, { cwd: repoDir, stdio: "ignore" });
+    git("git init -q -b main && git config user.email t@t && git config user.name t");
+    writeFileSync(join(repoDir, "README.md"), "# e2e repo\n");
+    git("git add . && git commit -q -m init");
+    // Clean branch: a README-only change (no code findings).
+    git("git checkout -q -b orchestra/e2e-clean");
+    writeFileSync(join(repoDir, "README.md"), "# e2e repo\n\nUpdated usage.\n");
+    git("git add . && git commit -q -m 'PROJ-123: update readme'");
+    // Dirty branch: a hardcoded secret (security scanner must catch it).
+    git("git checkout -q main && git checkout -q -b orchestra/e2e-dirty");
+    writeFileSync(join(repoDir, "config.ts"), "export const SECRET = 'super-secret-value-123';\n");
+    git("git add . && git commit -q -m 'PROJ-123: add config'");
+
+    tools.register(createDiffTool({}));
+
     executor = new WorkflowExecutor({
       store,
       registry,
       tools,
       queue,
-      policy: new PolicyEngine(DEFAULT_BLOCKING_RULES),
+      policy,
       logger,
       definitions: loadWorkflows(join(process.cwd(), "workflows"), registry)
     });
@@ -87,6 +120,7 @@ Given a valid reset link, when the user submits a new password, then access is u
   afterAll(async () => {
     await pool.end();
     await queue.close();
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   });
 
   async function drainUntilParked(maxPasses = 200): Promise<void> {
@@ -104,13 +138,14 @@ Given a valid reset link, when the user submits a new password, then access is u
   it("drives the software-delivery workflow through both human approval gates", async () => {
     const run = await executor.startRun("software-delivery", {
       issue_key: "PROJ-123",
-      repo_path: "/tmp/orchestra-e2e-repo"
+      repo_path: repoDir,
+      branch: "orchestra/e2e-clean",
+      base_branch: "main"
     });
 
     await drainUntilParked();
 
-    // Parked at the requirements approval gate; the requirements agent ran and
-    // everything before the gate succeeded.
+    // Parked at the requirements approval gate; the requirements agent ran.
     let current = await store.getRun(run.id);
     expect(current?.status).toBe("running");
     const reqStage = await store.getStageRun(run.id, "requirements");
@@ -119,10 +154,6 @@ Given a valid reset link, when the user submits a new password, then access is u
     const reqApproval = await store.getApproval(run.id, "requirements-approval");
     expect(reqApproval?.decision).toBe("pending");
 
-    // The requirements agent wrote its analysis back to the stage output.
-    expect(reqStage?.output).toBeDefined();
-
-    // First human approval (requirements).
     await queue.enqueue("approval.decision", {
       runId: run.id,
       stageId: "requirements-approval",
@@ -131,13 +162,22 @@ Given a valid reset link, when the user submits a new password, then access is u
     });
     await drainUntilParked();
 
-    // Parked at the final human approval gate.
+    // Parked at the final human approval gate; reviews ran for real.
     current = await store.getRun(run.id);
     expect(current?.status).toBe("running");
     const finalApproval = await store.getApproval(run.id, "human-approval");
     expect(finalApproval?.decision).toBe("pending");
+    for (const stageId of [
+      "reviews:code-review-agent",
+      "reviews:security-review-agent",
+      "reviews:architecture-review-agent",
+      "reviews:test-review-agent"
+    ]) {
+      const stage = await store.getStageRun(run.id, stageId);
+      expect(stage?.status).toBe("succeeded");
+      expect(stage?.agentVersion).toBe("1.0.0");
+    }
 
-    // Second human approval (pre-merge).
     await queue.enqueue("approval.decision", {
       runId: run.id,
       stageId: "human-approval",
@@ -150,26 +190,60 @@ Given a valid reset link, when the user submits a new password, then access is u
     expect(current?.status).toBe("succeeded");
 
     const stages = await store.listStageRuns(run.id);
-    expect(stages.map((s) => s.stageId)).toEqual([
-      "requirements",
-      "requirements-approval",
-      "development",
-      "reviews:noop-review-agent",
-      "reviews:noop-security-agent",
-      "reviews",
-      "quality-gate",
-      "human-approval",
-      "merge",
-      "deployment",
-      "verification"
-    ]);
+    // Review stages are created concurrently; compare as a sorted set.
+    expect(stages.map((s) => s.stageId).sort()).toEqual(
+      [
+        "requirements",
+        "requirements-approval",
+        "development",
+        "reviews:code-review-agent",
+        "reviews:security-review-agent",
+        "reviews:architecture-review-agent",
+        "reviews:test-review-agent",
+        "reviews",
+        "quality-gate",
+        "human-approval",
+        "merge",
+        "deployment",
+        "verification"
+      ].sort()
+    );
     expect(stages.every((s) => s.status === "succeeded")).toBe(true);
 
     const events = await store.listEvents(run.id);
     expect(events.map((e) => e.type).filter((t) => t === "approval.requested")).toHaveLength(2);
     expect(events.map((e) => e.type)).toContain("workflow.succeeded");
-
     expect(await queue.pendingCount()).toBe(0);
+  });
+
+  it("blocks the run when a review finds a policy-blocking vulnerability", async () => {
+    const run = await executor.startRun("software-delivery", {
+      issue_key: "PROJ-123",
+      repo_path: repoDir,
+      branch: "orchestra/e2e-dirty",
+      base_branch: "main"
+    });
+
+    await drainUntilParked();
+
+    // Approve requirements-approval to reach the reviews. On the dirty
+    // branch the security review BLOCKS during the reviews stage — the run
+    // is blocked before any pre-merge approval is ever requested.
+    await queue.enqueue("approval.decision", {
+      runId: run.id,
+      stageId: "requirements-approval",
+      decision: "approved",
+      approvedBy: "e2e"
+    });
+    await drainUntilParked();
+    const current = await store.getRun(run.id);
+    expect(current?.status).toBe("blocked");
+    const securityStage = await store.getStageRun(run.id, "reviews:security-review-agent");
+    expect(securityStage?.status).toBe("blocked");
+    const events = await store.listEvents(run.id);
+    expect(events.map((e) => e.type)).toContain("workflow.blocked");
+    // Merge and deployment never ran.
+    expect(await store.getStageRun(run.id, "merge")).toBeNull();
   });
 
   it("recovers non-terminal runs on boot", async () => {

@@ -43,6 +43,7 @@ export interface GitHubAdapter {
     body?: string;
   }): Promise<GitHubPullRequest>;
   getPullRequest(pr: GitHubPullRequestRef): Promise<GitHubPullRequest | null>;
+  getPullRequestDiff(pr: GitHubPullRequestRef): Promise<string>;
   listChecks(pr: GitHubPullRequestRef): Promise<GitHubCheckRun[]>;
   commentOnPullRequest(pr: GitHubPullRequestRef, body: string): Promise<void>;
   mergePullRequest(pr: GitHubPullRequestRef): Promise<void>;
@@ -121,6 +122,16 @@ export class OctokitGitHubAdapter implements GitHubAdapter {
     }
   }
 
+  async getPullRequestDiff(pr: GitHubPullRequestRef): Promise<string> {
+    const res = await this.octokit.rest.pulls.get({
+      owner: pr.owner,
+      repo: pr.name,
+      pull_number: pr.number,
+      mediaType: { format: "diff" }
+    });
+    return typeof res.data === "string" ? res.data : "";
+  }
+
   async listChecks(pr: GitHubPullRequestRef): Promise<GitHubCheckRun[]> {
     const head = await this.octokit.rest.pulls.get({
       owner: pr.owner,
@@ -162,6 +173,8 @@ export class InMemoryGitHubAdapter implements GitHubAdapter {
   readonly pullRequests: GitHubPullRequest[] = [];
   readonly comments: { pr: GitHubPullRequestRef; body: string }[] = [];
   readonly mergedBranches: { repo: GitHubRepositoryRef; branch: string }[] = [];
+  /** Test helper: diff content per PR number. */
+  readonly diffs = new Map<number, string>();
   private nextPrNumber = 1;
 
   async listRepositories(): Promise<GitHubRepositoryRef[]> {
@@ -197,6 +210,10 @@ export class InMemoryGitHubAdapter implements GitHubAdapter {
 
   async getPullRequest(pr: GitHubPullRequestRef): Promise<GitHubPullRequest | null> {
     return this.pullRequests.find((p) => p.number === pr.number) ?? null;
+  }
+
+  async getPullRequestDiff(pr: GitHubPullRequestRef): Promise<string> {
+    return this.diffs.get(pr.number) ?? "";
   }
 
   async listChecks(_pr: GitHubPullRequestRef): Promise<GitHubCheckRun[]> {

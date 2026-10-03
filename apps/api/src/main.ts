@@ -7,13 +7,23 @@ import {
   AgentRegistry,
   AnthropicLlmClient,
   DEFAULT_BLOCKING_RULES,
+  ArchitectureReviewAgent,
+  CodeReviewAgent,
   DevelopmentAgent,
   NoopAgent,
   PolicyEngine,
   RequirementsAgent,
+  SecurityReviewAgent,
+  TestReviewAgent,
   ToolRegistry
 } from "@orchestra/agents";
-import { JiraRestAdapter, OctokitGitHubAdapter, registerGitHubTools, registerJiraTools } from "@orchestra/integrations";
+import {
+  createDiffTool,
+  JiraRestAdapter,
+  OctokitGitHubAdapter,
+  registerGitHubTools,
+  registerJiraTools
+} from "@orchestra/integrations";
 import { loadWorkflows, WorkflowExecutor } from "@orchestra/workflow-engine";
 import { ClaudeCodeCliExecutor, NoopExecutor } from "@orchestra/claude-code";
 import { Octokit } from "@octokit/rest";
@@ -55,13 +65,22 @@ async function main(): Promise<void> {
       : new NoopExecutor();
   registry.register(new DevelopmentAgent({ executor: devExecutor }));
 
+  let githubAdapter: OctokitGitHubAdapter | undefined;
   if (config.githubToken) {
-    const github = new OctokitGitHubAdapter(new Octokit({ auth: config.githubToken }));
-    registerGitHubTools(tools, github);
+    githubAdapter = new OctokitGitHubAdapter(new Octokit({ auth: config.githubToken }));
+    registerGitHubTools(tools, githubAdapter);
     logger.info("github tools registered (Octokit adapter)");
   } else {
     logger.info("github not configured (GITHUB_TOKEN unset) — github tools unavailable");
   }
+
+  // Diff access for review agents: PR mode (github) or local branch mode.
+  tools.register(createDiffTool({ github: githubAdapter }));
+
+  registry.register(new CodeReviewAgent({ llm, policy }));
+  registry.register(new SecurityReviewAgent({ llm, policy }));
+  registry.register(new ArchitectureReviewAgent({ llm, policy }));
+  registry.register(new TestReviewAgent({ llm, policy }));
 
   registry.register(new NoopAgent());
   registry.register(new NoopAgent("noop-review-agent", "Noop Review Agent"));

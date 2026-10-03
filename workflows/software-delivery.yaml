@@ -27,8 +27,10 @@ stages:
   - id: reviews
     type: parallel
     parallel:
-      - noop-review-agent
-      - noop-security-agent
+      - code-review-agent
+      - security-review-agent
+      - architecture-review-agent
+      - test-review-agent
     depends_on: [development]
 
   - id: quality-gate
