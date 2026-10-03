@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX IF NOT EXISTS "stage_runs_run_stage_idx" ON "stage_runs" USING btree ("run_id","stage_id");

@@ -41,9 +41,15 @@ importers:
       '@fastify/cors':
         specifier: ^10.0.1
         version: 10.1.0
+      '@octokit/rest':
+        specifier: ^21.0.0
+        version: 21.1.1
       '@orchestra/agents':
         specifier: workspace:*
         version: link:../../packages/agents
+      '@orchestra/claude-code':
+        specifier: workspace:*
+        version: link:../../packages/claude-code
       '@orchestra/database':
         specifier: workspace:*
         version: link:../../packages/database
@@ -119,15 +125,24 @@ importers:
 
   apps/worker:
     dependencies:
+      '@octokit/rest':
+        specifier: ^21.0.0
+        version: 21.1.1
       '@orchestra/agents':
         specifier: workspace:*
         version: link:../../packages/agents
+      '@orchestra/claude-code':
+        specifier: workspace:*
+        version: link:../../packages/claude-code
       '@orchestra/database':
         specifier: workspace:*
         version: link:../../packages/database
       '@orchestra/event-bus':
         specifier: workspace:*
         version: link:../../packages/event-bus
+      '@orchestra/integrations':
+        specifier: workspace:*
+        version: link:../../packages/integrations
       '@orchestra/observability':
         specifier: workspace:*
         version: link:../../packages/observability
@@ -147,6 +162,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.131.0
         version: 0.131.0(zod@3.25.76)
+      '@orchestra/claude-code':
+        specifier: workspace:*
+        version: link:../claude-code
       '@orchestra/shared':
         specifier: workspace:*
         version: link:../shared
@@ -156,6 +174,9 @@ importers:
 
   packages/claude-code:
     dependencies:
+      '@orchestra/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@orchestra/shared':
         specifier: workspace:*
         version: link:../shared

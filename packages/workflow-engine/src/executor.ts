@@ -252,6 +252,21 @@ export class WorkflowExecutor {
       if (depRun) depOutputs[dep] = depRun.output ?? { status: depRun.status };
     }
 
+    // Context propagation: workflow context flattened with static stage input
+    // (stage input wins), plus dependency outputs. Validation sees exactly
+    // what the agent will execute with (§15, §16).
+    const stageInput = { ...run.context, ...stage.input, dependencies: depOutputs };
+    const validation = agent.validate(stageInput);
+    if (!validation.ok) {
+      await this.handleStageFailure(
+        run,
+        stage,
+        stageRun,
+        new Error(`stage input validation failed: ${validation.errors.join("; ")}`)
+      );
+      return;
+    }
+
     const attempt = stageRun.attempts + 1;
     await store.updateStageRun(stageRun.id, {
       status: "running",
@@ -260,7 +275,7 @@ export class WorkflowExecutor {
       error: null,
       agentVersion: agent.version,
       // Persist exactly what the agent will receive (auditability).
-      input: { ...stage.input, dependencies: depOutputs }
+      input: stageInput
     });
     await store.appendEvent({
       type: "stage.started",
@@ -273,7 +288,7 @@ export class WorkflowExecutor {
       runId: run.id,
       stageId: stage.id,
       agentId: agent.id,
-      input: { ...stage.input, dependencies: depOutputs },
+      input: stageInput,
       workflowContext: run.context,
       tools: tools.forPermissions(agent.permissions()),
       logger
@@ -373,7 +388,10 @@ export class WorkflowExecutor {
   ): Promise<void> {
     const { store, queue, logger } = this.deps;
     const message = error instanceof Error ? error.message : String(error);
+    // Persist the attempt increment here so every failure path (agent throw,
+    // agent-reported failure, input validation) counts against max_attempts.
     const attempts = stageRun.attempts + 1;
+    await store.updateStageRun(stageRun.id, { attempts });
 
     if (attempts < stage.max_attempts) {
       const backoffMs = BACKOFF_BASE_MS * 2 ** (attempts - 1);

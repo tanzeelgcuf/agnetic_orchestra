@@ -108,6 +108,8 @@ export class PgWorkflowStore implements WorkflowStore {
     status: StageStatus;
     input?: Record<string, unknown>;
   }): Promise<StageRun> {
+    // Idempotent under concurrent engine advances for the same run: on a
+    // (run_id, stage_id) conflict, return the existing row.
     const [row] = await this.db
       .insert(stageRuns)
       .values({
@@ -119,9 +121,12 @@ export class PgWorkflowStore implements WorkflowStore {
         status: input.status,
         input: input.input ?? null
       })
+      .onConflictDoNothing()
       .returning();
-    if (!row) throw new Error("insert stage_runs returned no row");
-    return toStageRun(row);
+    if (row) return toStageRun(row);
+    const existing = await this.getStageRun(input.runId, input.stageId);
+    if (!existing) throw new Error("insert stage_runs conflicted but no row exists");
+    return existing;
   }
 
   async getStageRun(runId: string, stageId: string): Promise<StageRun | null> {

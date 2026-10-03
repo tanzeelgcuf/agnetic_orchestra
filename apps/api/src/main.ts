@@ -1,20 +1,22 @@
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "@orchestra/shared";
 import { createLogger } from "@orchestra/observability";
-import { createDb, PgWorkflowStore } from "@orchestra/database";
+import { createDb, PgWebhookStore, PgWorkflowStore } from "@orchestra/database";
 import { PostgresQueue } from "@orchestra/event-bus";
 import {
   AgentRegistry,
   AnthropicLlmClient,
   DEFAULT_BLOCKING_RULES,
+  DevelopmentAgent,
   NoopAgent,
   PolicyEngine,
   RequirementsAgent,
   ToolRegistry
 } from "@orchestra/agents";
-import { JiraRestAdapter, registerJiraTools } from "@orchestra/integrations";
+import { JiraRestAdapter, OctokitGitHubAdapter, registerGitHubTools, registerJiraTools } from "@orchestra/integrations";
 import { loadWorkflows, WorkflowExecutor } from "@orchestra/workflow-engine";
-import { PgWebhookStore } from "@orchestra/database";
+import { ClaudeCodeCliExecutor, NoopExecutor } from "@orchestra/claude-code";
+import { Octokit } from "@octokit/rest";
 import { WorkflowTriggerHandler } from "./webhooks";
 import { buildServer } from "./server";
 
@@ -46,6 +48,21 @@ async function main(): Promise<void> {
 
   const llm = process.env.ANTHROPIC_API_KEY ? new AnthropicLlmClient() : undefined;
   registry.register(new RequirementsAgent(llm));
+
+  const devExecutor =
+    process.env.ORCHESTRA_DEV_EXECUTOR === "cli"
+      ? new ClaudeCodeCliExecutor(logger)
+      : new NoopExecutor();
+  registry.register(new DevelopmentAgent({ executor: devExecutor }));
+
+  if (config.githubToken) {
+    const github = new OctokitGitHubAdapter(new Octokit({ auth: config.githubToken }));
+    registerGitHubTools(tools, github);
+    logger.info("github tools registered (Octokit adapter)");
+  } else {
+    logger.info("github not configured (GITHUB_TOKEN unset) — github tools unavailable");
+  }
+
   registry.register(new NoopAgent());
   registry.register(new NoopAgent("noop-review-agent", "Noop Review Agent"));
   registry.register(new NoopAgent("noop-security-agent", "Noop Security Agent"));

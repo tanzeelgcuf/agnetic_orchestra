@@ -9,6 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@orchestra/observability": "workspace:*",
     "@orchestra/shared": "workspace:*"
   }
 }

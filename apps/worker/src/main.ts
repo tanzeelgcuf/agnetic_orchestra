@@ -7,13 +7,16 @@ import {
   AgentRegistry,
   AnthropicLlmClient,
   DEFAULT_BLOCKING_RULES,
+  DevelopmentAgent,
   NoopAgent,
   PolicyEngine,
   RequirementsAgent,
   ToolRegistry
 } from "@orchestra/agents";
-import { JiraRestAdapter, registerJiraTools } from "@orchestra/integrations";
+import { JiraRestAdapter, OctokitGitHubAdapter, registerGitHubTools, registerJiraTools } from "@orchestra/integrations";
 import { loadWorkflows, WorkflowExecutor } from "@orchestra/workflow-engine";
+import { ClaudeCodeCliExecutor, NoopExecutor } from "@orchestra/claude-code";
+import { Octokit } from "@octokit/rest";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -47,6 +50,21 @@ async function main(): Promise<void> {
 
   const llm = process.env.ANTHROPIC_API_KEY ? new AnthropicLlmClient() : undefined;
   registry.register(new RequirementsAgent(llm));
+
+  const devExecutor =
+    process.env.ORCHESTRA_DEV_EXECUTOR === "cli"
+      ? new ClaudeCodeCliExecutor(logger)
+      : new NoopExecutor();
+  registry.register(new DevelopmentAgent({ executor: devExecutor }));
+
+  if (config.githubToken) {
+    const github = new OctokitGitHubAdapter(new Octokit({ auth: config.githubToken }));
+    registerGitHubTools(tools, github);
+    logger.info("github tools registered (Octokit adapter)");
+  } else {
+    logger.info("github not configured (GITHUB_TOKEN unset) — github tools unavailable");
+  }
+
   registry.register(new NoopAgent());
   registry.register(new NoopAgent("noop-review-agent", "Noop Review Agent"));
   registry.register(new NoopAgent("noop-security-agent", "Noop Security Agent"));
@@ -83,17 +101,30 @@ async function main(): Promise<void> {
       continue;
     }
 
+    // Group by run before dispatching (see the per-run serialization below).
+    const byRun = new Map<string, typeof messages>();
+    for (const msg of messages) {
+      const key = String(msg.payload.runId ?? msg.id);
+      const group = byRun.get(key) ?? [];
+      group.push(msg);
+      byRun.set(key, group);
+    }
+
     await Promise.all(
-      messages.map(async (msg) => {
-        try {
-          await executor.handleQueueMessage(msg);
-          await queue.complete(msg);
-        } catch (err) {
-          logger.error({ err, messageId: msg.id, kind: msg.kind, attempts: msg.attempts }, "message failed");
-          const backoffMs = 1_000 * 2 ** (msg.attempts - 1);
-          const outcome = await queue.fail(msg, err, backoffMs);
-          if (outcome === "dead") {
-            logger.error({ messageId: msg.id, kind: msg.kind }, "message moved to dead-letter");
+      [...byRun.values()].map(async (group) => {
+        // Serialize messages for the SAME run: concurrent engine advances for
+        // one run would race on stage creation. Different runs stay parallel.
+        for (const msg of group) {
+          try {
+            await executor.handleQueueMessage(msg);
+            await queue.complete(msg);
+          } catch (err) {
+            logger.error({ err, messageId: msg.id, kind: msg.kind, attempts: msg.attempts }, "message failed");
+            const backoffMs = 1_000 * 2 ** (msg.attempts - 1);
+            const outcome = await queue.fail(msg, err, backoffMs);
+            if (outcome === "dead") {
+              logger.error({ messageId: msg.id, kind: msg.kind }, "message moved to dead-letter");
+            }
           }
         }
       })

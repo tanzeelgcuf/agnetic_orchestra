@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
+    "@orchestra/claude-code": "workspace:*",
     "@orchestra/shared": "workspace:*",
     "zod": "^3.25.76"
   }

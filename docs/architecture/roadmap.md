@@ -44,12 +44,21 @@ verification are all in place.
 - [x] Scoped secret resolution: `SecretProvider` (env-backed) + per-integration
       config (GITHUB_TOKEN, GITHUB_WEBHOOK_SECRET, JIRA_*)
 
-## Phase 4 — Claude Code execution
+## Phase 4 — Claude Code execution  *(complete — verified 2026-10-03)*
 
-- [ ] `ClaudeCodeExecutor` over headless Claude Code (`claude -p`)
-- [ ] Development Agent: plan → implement smallest logical change → verify loop
-- [ ] Workspace isolation, command allowlists, env filtering
-- [ ] PR creation/updates; iterate until quality gates pass
+- [x] `ClaudeCodeExecutor` over headless Claude Code (`claude -p`): `ClaudeCodeCliExecutor`
+      (spawn, timeout, output capture, credential-stripping env filter) +
+      `NoopExecutor` for tests; `ORCHESTRA_DEV_EXECUTOR=noop|cli` selects
+- [x] Development Agent: plan (read-only tools) → implement + verify
+      (read/write/bash) → commit/push (shell-only) loop; untrusted-content
+      defense in every prompt; PR creation via `github.create_pull_request`
+      tool when available — never merges its own PR
+- [x] Workspace isolation: `WorktreeWorkspaceManager` (git worktree in temp
+      dirs); engine enforces `agent.validate(input)` before execution (§15)
+- [x] PR creation/update path: `registerGitHubTools` (merge deliberately
+      excluded); fix-iteration on review findings lands with Phase 5/6 wiring
+- [x] Concurrency hardening found during verification: unique index on
+      `(run_id, stage_id)` + conflict-refetch + per-run worker serialization
 
 ## Phase 5 — Review orchestra
 

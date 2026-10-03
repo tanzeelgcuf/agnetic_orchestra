@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Octokit } from "@octokit/rest";
+import type { ToolRegistry } from "@orchestra/agents";
 
 /**
  * GitHub adapter. The orchestration engine and agents depend on this
@@ -352,4 +353,84 @@ function asString(value: unknown): string | undefined {
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
+}
+
+/**
+ * Register a GitHub adapter's PR-surface operations as tools. Deliberately
+ * EXCLUDES merge_pull_request: the Development Agent must never merge its own
+ * PR — merge is a workflow stage behind human approval.
+ */
+export function registerGitHubTools(registry: ToolRegistry, github: GitHubAdapter): void {
+  registry.register({
+    name: "github.create_pull_request",
+    description: "Create a pull request",
+    execute: async (input) => {
+      const { repo, title, head, base, body } = input as {
+        repo?: unknown;
+        title?: unknown;
+        head?: unknown;
+        base?: unknown;
+        body?: unknown;
+      };
+      if (
+        !isRepoRef(repo) ||
+        typeof title !== "string" ||
+        typeof head !== "string" ||
+        typeof base !== "string"
+      ) {
+        throw new Error("github.create_pull_request requires repo {owner,name}, title, head, base");
+      }
+      return github.createPullRequest({
+        repo,
+        title,
+        head,
+        base,
+        ...(typeof body === "string" ? { body } : {})
+      });
+    }
+  });
+  registry.register({
+    name: "github.get_pull_request",
+    description: "Fetch a pull request by number",
+    execute: async (input) => {
+      const pr = toPrRef(input);
+      if (!pr) throw new Error("github.get_pull_request requires repo {owner,name} and number");
+      return github.getPullRequest(pr);
+    }
+  });
+  registry.register({
+    name: "github.list_checks",
+    description: "List check runs for a pull request's head",
+    execute: async (input) => {
+      const pr = toPrRef(input);
+      if (!pr) throw new Error("github.list_checks requires repo {owner,name} and number");
+      return github.listChecks(pr);
+    }
+  });
+  registry.register({
+    name: "github.comment_on_pull_request",
+    description: "Add a comment to a pull request",
+    execute: async (input) => {
+      const pr = toPrRef(input);
+      const body = (input as { body?: unknown }).body;
+      if (!pr || typeof body !== "string") {
+        throw new Error("github.comment_on_pull_request requires repo {owner,name}, number, body");
+      }
+      await github.commentOnPullRequest(pr, body);
+      return { ok: true };
+    }
+  });
+}
+
+function isRepoRef(value: unknown): value is GitHubRepositoryRef {
+  if (!value || typeof value !== "object") return false;
+  const repo = value as { owner?: unknown; name?: unknown };
+  return typeof repo.owner === "string" && typeof repo.name === "string";
+}
+
+function toPrRef(input: unknown): GitHubPullRequestRef | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const { repo, number } = input as { repo?: unknown; number?: unknown };
+  if (!isRepoRef(repo) || typeof number !== "number") return undefined;
+  return { ...repo, number };
 }

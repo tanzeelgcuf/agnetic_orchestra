@@ -15,6 +15,13 @@
       "when": 1790952609625,
       "tag": "0001_sticky_nightcrawler",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791046667742,
+      "tag": "0002_cool_flatman",
+      "breakpoints": true
     }
   ]
 }

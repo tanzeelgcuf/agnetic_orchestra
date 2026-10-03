@@ -6,6 +6,7 @@ import { PostgresQueue } from "@orchestra/event-bus";
 import {
   AgentRegistry,
   DEFAULT_BLOCKING_RULES,
+  DevelopmentAgent,
   NoopAgent,
   PolicyEngine,
   RequirementsAgent,
@@ -13,6 +14,7 @@ import {
 } from "@orchestra/agents";
 import { InMemoryJiraAdapter, registerJiraTools } from "@orchestra/integrations";
 import { loadWorkflows, WorkflowExecutor } from "@orchestra/workflow-engine";
+import { NoopExecutor } from "@orchestra/claude-code";
 import { join } from "node:path";
 
 const DATABASE_URL =
@@ -46,6 +48,7 @@ describe.skipIf(!pgUp)("orchestrated run against PostgreSQL", () => {
 
     const registry = new AgentRegistry();
     registry.register(new RequirementsAgent()); // heuristic analysis (no LLM in tests)
+    registry.register(new DevelopmentAgent({ executor: new NoopExecutor() }));
     registry.register(new NoopAgent());
     registry.register(new NoopAgent("noop-review-agent", "Noop Review Agent"));
     registry.register(new NoopAgent("noop-security-agent", "Noop Security Agent"));
@@ -99,7 +102,10 @@ Given a valid reset link, when the user submits a new password, then access is u
   }
 
   it("drives the software-delivery workflow through both human approval gates", async () => {
-    const run = await executor.startRun("software-delivery", { issue_key: "PROJ-123" });
+    const run = await executor.startRun("software-delivery", {
+      issue_key: "PROJ-123",
+      repo_path: "/tmp/orchestra-e2e-repo"
+    });
 
     await drainUntilParked();
 

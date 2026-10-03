@@ -283,6 +283,43 @@ stages:
     const input = downstream?.input as { dependencies: Record<string, unknown> };
     expect(input.dependencies.upstream).toBeDefined();
   });
+
+  it("rejects stage input that fails the agent's validate() contract", async () => {
+    class PickyAgent implements Agent {
+      readonly id = "picky-agent";
+      readonly name = "Picky";
+      readonly version = "1.0.0";
+      capabilities() {
+        return [];
+      }
+      permissions() {
+        return {};
+      }
+      validate(input: Record<string, unknown>) {
+        if (typeof input.required_field !== "string") {
+          return { ok: false, errors: ["required_field must be a string"] };
+        }
+        return { ok: true, errors: [] };
+      }
+      async execute(_ctx: AgentContext): Promise<AgentResult> {
+        return { status: "success", summary: "should never run" };
+      }
+    }
+    const def = parseWorkflowDefinition(`
+name: picky
+stages:
+  - id: gated-input
+    agent: picky-agent
+    max_attempts: 2
+`);
+    const { store, queue, executor } = buildHarness({ picky: def }, [new PickyAgent()]);
+    const run = await executor.startRun("picky", {});
+    await drain(executor, queue);
+
+    expect((await store.getRun(run.id))?.status).toBe("failed");
+    const stage = await store.getStageRun(run.id, "gated-input");
+    expect(stage?.error).toContain("required_field must be a string");
+  });
 });
 
 describe("workflow definition validation", () => {

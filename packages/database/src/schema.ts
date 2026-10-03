@@ -39,7 +39,12 @@ export const stageRuns = pgTable(
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
-  (t) => [index("stage_runs_run_id_idx").on(t.runId)]
+  (t) => [
+    index("stage_runs_run_id_idx").on(t.runId),
+    // One stage run per (run, stage): concurrent engine advances race on
+    // creation; the unique index + conflict-refetch keeps them idempotent.
+    uniqueIndex("stage_runs_run_stage_idx").on(t.runId, t.stageId)
+  ]
 );
 
 export const workflowEvents = pgTable(
