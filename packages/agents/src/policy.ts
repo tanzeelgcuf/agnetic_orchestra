@@ -12,6 +12,19 @@ export const DEFAULT_BLOCKING_RULES: BlockingRules = {
   tests: { critical: "block" }
 };
 
+export interface EnvironmentPolicy {
+  requiresApproval: boolean;
+  blockingRules: BlockingRules;
+}
+
+/** Per-environment deployment policies (Phase 7). Enforcement of the
+ * production gate stays the static approval stage in the workflow; this is
+ * the canonical, unit-testable mapping. Configurable per project. */
+export const DEFAULT_ENVIRONMENT_POLICIES: Record<string, EnvironmentPolicy> = {
+  production: { requiresApproval: true, blockingRules: DEFAULT_BLOCKING_RULES },
+  staging: { requiresApproval: false, blockingRules: { security: { critical: "block" } } }
+};
+
 const ACTION_RANK: readonly PolicyAction[] = ["ignore", "warn", "retry", "block"];
 
 export interface PolicyDecision {

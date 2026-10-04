@@ -7,10 +7,13 @@ import {
   AgentRegistry,
   AnthropicLlmClient,
   DEFAULT_BLOCKING_RULES,
+  DEFAULT_ENVIRONMENT_POLICIES,
   ArchitectureReviewAgent,
   CodeReviewAgent,
+  DeploymentAgent,
   DevelopmentAgent,
   GitleaksScanner,
+  MergeAgent,
   NoopAgent,
   QualityGateAgent,
   PolicyEngine,
@@ -18,7 +21,8 @@ import {
   SemgrepScanner,
   SecurityReviewAgent,
   TestReviewAgent,
-  ToolRegistry
+  ToolRegistry,
+  VerificationAgent
 } from "@orchestra/agents";
 import {
   createDiffTool,
@@ -30,7 +34,7 @@ import {
 import { loadWorkflows, WorkflowExecutor } from "@orchestra/workflow-engine";
 import { ClaudeCodeCliExecutor, NoopExecutor } from "@orchestra/claude-code";
 import { Octokit } from "@octokit/rest";
-import { WorkflowTriggerHandler } from "./webhooks";
+import { CiCorrelationHandler, WorkflowTriggerHandler } from "./webhooks";
 import { buildServer } from "./server";
 
 async function main(): Promise<void> {
@@ -88,6 +92,14 @@ async function main(): Promise<void> {
   registry.register(new ArchitectureReviewAgent({ llm, policy }));
   registry.register(new TestReviewAgent({ llm, policy }));
 
+  // Delivery agents (Phase 7): merge/deployment/verification. Without a
+  // GitHub adapter they degrade to skip-success so unconfigured runs proceed.
+  registry.register(new MergeAgent({ github: githubAdapter }));
+  registry.register(
+    new DeploymentAgent({ github: githubAdapter, envPolicies: DEFAULT_ENVIRONMENT_POLICIES })
+  );
+  registry.register(new VerificationAgent({ github: githubAdapter }));
+
   registry.register(new NoopAgent());
   registry.register(new NoopAgent("noop-review-agent", "Noop Review Agent"));
   registry.register(new NoopAgent("noop-security-agent", "Noop Security Agent"));
@@ -118,7 +130,8 @@ async function main(): Promise<void> {
       new WorkflowTriggerHandler(
         (definition, context) => executor.startRun(definition, context),
         config.webhookTriggers
-      )
+      ),
+      new CiCorrelationHandler(store)
     ]
   });
 

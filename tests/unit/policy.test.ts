@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_BLOCKING_RULES, PolicyEngine } from "@orchestra/agents";
+import { DEFAULT_BLOCKING_RULES, DEFAULT_ENVIRONMENT_POLICIES, PolicyEngine } from "@orchestra/agents";
 import type { Finding } from "@orchestra/shared";
 
 function finding(partial: Partial<Finding>): Finding {
@@ -58,5 +58,22 @@ describe("policy engine", () => {
     const warnOnly = engine.evaluate([finding({ severity: "medium", domain: "code" })]);
     expect(warnOnly.action).toBe("warn");
     expect(warnOnly.blockingFindings).toHaveLength(0);
+  });
+});
+
+describe("environment policies", () => {
+  it("requires approval for production", () => {
+    expect(DEFAULT_ENVIRONMENT_POLICIES.production?.requiresApproval).toBe(true);
+  });
+
+  it("does not require approval for staging", () => {
+    expect(DEFAULT_ENVIRONMENT_POLICIES.staging?.requiresApproval).toBe(false);
+  });
+
+  it("defines blocking rules for each environment", () => {
+    expect(DEFAULT_ENVIRONMENT_POLICIES.production?.blockingRules).toEqual(DEFAULT_BLOCKING_RULES);
+    expect(DEFAULT_ENVIRONMENT_POLICIES.staging?.blockingRules).toEqual({
+      security: { critical: "block" }
+    });
   });
 });

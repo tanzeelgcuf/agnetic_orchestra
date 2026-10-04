@@ -32,6 +32,27 @@ export interface GitHubCheckRun {
   conclusion?: "success" | "failure" | "cancelled" | "skipped";
 }
 
+export interface GitHubWorkflowRun {
+  id: number;
+  name?: string;
+  headBranch?: string;
+  headSha?: string;
+  status: "queued" | "in_progress" | "completed";
+  conclusion?: "success" | "failure" | "cancelled" | "skipped" | "timed_out";
+  url?: string;
+}
+
+export interface GitHubDeployment {
+  id: number;
+  ref: string;
+  environment: string;
+}
+
+export interface GitHubDeploymentStatus {
+  state: string;
+  description?: string;
+}
+
 export interface GitHubAdapter {
   listRepositories(): Promise<GitHubRepositoryRef[]>;
   createBranch(repo: GitHubRepositoryRef, branch: string, fromRef: string): Promise<void>;
@@ -43,10 +64,41 @@ export interface GitHubAdapter {
     body?: string;
   }): Promise<GitHubPullRequest>;
   getPullRequest(pr: GitHubPullRequestRef): Promise<GitHubPullRequest | null>;
+  /** Open PR whose head is the given branch (Phase 7: merge stage). */
+  getPullRequestByBranch(repo: GitHubRepositoryRef, headBranch: string): Promise<GitHubPullRequest | null>;
   getPullRequestDiff(pr: GitHubPullRequestRef): Promise<string>;
   listChecks(pr: GitHubPullRequestRef): Promise<GitHubCheckRun[]>;
+  /** Head commit sha of a branch, or null when the branch does not exist. */
+  getBranchHead(repo: GitHubRepositoryRef, branch: string): Promise<string | null>;
   commentOnPullRequest(pr: GitHubPullRequestRef, body: string): Promise<void>;
   mergePullRequest(pr: GitHubPullRequestRef): Promise<void>;
+  /** Trigger a GitHub Actions workflow via workflow_dispatch (Phase 7: deployment). */
+  dispatchWorkflow(input: {
+    repo: GitHubRepositoryRef;
+    workflowFile: string;
+    ref: string;
+    inputs?: Record<string, string | number>;
+  }): Promise<void>;
+  listWorkflowRuns(
+    repo: GitHubRepositoryRef,
+    filter?: { workflowFile?: string; headBranch?: string; headSha?: string }
+  ): Promise<GitHubWorkflowRun[]>;
+  createDeployment(input: {
+    repo: GitHubRepositoryRef;
+    ref: string;
+    environment: string;
+    description?: string;
+  }): Promise<GitHubDeployment>;
+  createDeploymentStatus(input: {
+    repo: GitHubRepositoryRef;
+    deploymentId: number;
+    state: "success" | "failure" | "error" | "in_progress";
+    description?: string;
+  }): Promise<void>;
+  getLatestDeploymentStatus(
+    repo: GitHubRepositoryRef,
+    deploymentId: number
+  ): Promise<GitHubDeploymentStatus | null>;
 }
 
 /** Real Octokit-backed adapter. Create only when a GITHUB_TOKEN is present. */
@@ -166,6 +218,142 @@ export class OctokitGitHubAdapter implements GitHubAdapter {
       pull_number: pr.number
     });
   }
+
+  async getPullRequestByBranch(
+    repo: GitHubRepositoryRef,
+    headBranch: string
+  ): Promise<GitHubPullRequest | null> {
+    const res = await this.octokit.rest.pulls.list({
+      owner: repo.owner,
+      repo: repo.name,
+      head: `${repo.owner}:${headBranch}`,
+      state: "open",
+      per_page: 1
+    });
+    const pr = res.data[0];
+    if (!pr) return null;
+    return {
+      number: pr.number,
+      title: pr.title,
+      state: pr.state === "closed" ? "closed" : "open",
+      headBranch: pr.head.ref,
+      baseBranch: pr.base.ref,
+      url: pr.html_url,
+      body: pr.body ?? undefined
+    };
+  }
+
+  async getBranchHead(repo: GitHubRepositoryRef, branch: string): Promise<string | null> {
+    try {
+      const res = await this.octokit.rest.repos.getBranch({
+        owner: repo.owner,
+        repo: repo.name,
+        branch
+      });
+      return res.data.commit.sha;
+    } catch (e) {
+      if (typeof e === "object" && e !== null && "status" in e && (e as { status: number }).status === 404) {
+        return null;
+      }
+      throw e;
+    }
+  }
+
+  async dispatchWorkflow(input: {
+    repo: GitHubRepositoryRef;
+    workflowFile: string;
+    ref: string;
+    inputs?: Record<string, string | number>;
+  }): Promise<void> {
+    await this.octokit.rest.actions.createWorkflowDispatch({
+      owner: input.repo.owner,
+      repo: input.repo.name,
+      workflow_id: input.workflowFile,
+      ref: input.ref,
+      ...(input.inputs !== undefined ? { inputs: input.inputs } : {})
+    });
+  }
+
+  async listWorkflowRuns(
+    repo: GitHubRepositoryRef,
+    filter?: { workflowFile?: string; headBranch?: string; headSha?: string }
+  ): Promise<GitHubWorkflowRun[]> {
+    const common = {
+      owner: repo.owner,
+      repo: repo.name,
+      per_page: 100
+    };
+    const res = filter?.workflowFile
+      ? await this.octokit.rest.actions.listWorkflowRuns({
+          ...common,
+          workflow_id: filter.workflowFile
+        })
+      : await this.octokit.rest.actions.listWorkflowRunsForRepo(common);
+    return res.data.workflow_runs
+      .map((run) => ({
+        id: run.id,
+        name: run.name ?? undefined,
+        headBranch: run.head_branch ?? undefined,
+        headSha: run.head_sha ?? undefined,
+        status: run.status as unknown as GitHubWorkflowRun["status"],
+        conclusion: (run.conclusion ?? undefined) as unknown as GitHubWorkflowRun["conclusion"],
+        url: run.html_url ?? undefined
+      }))
+      .filter(
+        (run) =>
+          (filter?.headBranch === undefined || run.headBranch === filter.headBranch) &&
+          (filter?.headSha === undefined || run.headSha === filter.headSha)
+      );
+  }
+
+  async createDeployment(input: {
+    repo: GitHubRepositoryRef;
+    ref: string;
+    environment: string;
+    description?: string;
+  }): Promise<GitHubDeployment> {
+    const res = await this.octokit.rest.repos.createDeployment({
+      owner: input.repo.owner,
+      repo: input.repo.name,
+      ref: input.ref,
+      environment: input.environment,
+      auto_merge: false,
+      ...(input.description !== undefined ? { description: input.description } : {})
+    });
+    // The response is a union: the 202 "nothing to deploy" variant has no id.
+    const id = "id" in res.data ? res.data.id : 0;
+    return { id, ref: input.ref, environment: input.environment };
+  }
+
+  async createDeploymentStatus(input: {
+    repo: GitHubRepositoryRef;
+    deploymentId: number;
+    state: "success" | "failure" | "error" | "in_progress";
+    description?: string;
+  }): Promise<void> {
+    await this.octokit.rest.repos.createDeploymentStatus({
+      owner: input.repo.owner,
+      repo: input.repo.name,
+      deployment_id: input.deploymentId,
+      state: input.state,
+      ...(input.description !== undefined ? { description: input.description } : {})
+    });
+  }
+
+  async getLatestDeploymentStatus(
+    repo: GitHubRepositoryRef,
+    deploymentId: number
+  ): Promise<GitHubDeploymentStatus | null> {
+    const res = await this.octokit.rest.repos.listDeploymentStatuses({
+      owner: repo.owner,
+      repo: repo.name,
+      deployment_id: deploymentId,
+      per_page: 1
+    });
+    const status = res.data[0];
+    if (!status) return null;
+    return { state: status.state, description: status.description ?? undefined };
+  }
 }
 
 /** In-memory double for tests and local development. */
@@ -175,7 +363,24 @@ export class InMemoryGitHubAdapter implements GitHubAdapter {
   readonly mergedBranches: { repo: GitHubRepositoryRef; branch: string }[] = [];
   /** Test helper: diff content per PR number. */
   readonly diffs = new Map<number, string>();
+  /** Test helper: check runs per branch — listChecks resolves via the PR's head branch. */
+  readonly checksByBranch = new Map<string, GitHubCheckRun[]>();
+  /** Test helper: branch name -> head sha. */
+  readonly branchHeads = new Map<string, string>();
+  readonly workflowRuns: GitHubWorkflowRun[] = [];
+  readonly dispatchedWorkflows: {
+    repo: GitHubRepositoryRef;
+    workflowFile: string;
+    ref: string;
+    inputs?: Record<string, string | number>;
+  }[] = [];
+  /** Test helper: queued conclusions consumed by each dispatchWorkflow, in order. */
+  readonly workflowConclusions: string[] = [];
+  readonly deployments: { repo: GitHubRepositoryRef; deployment: GitHubDeployment; description?: string }[] = [];
+  readonly deploymentStatuses: { deploymentId: number; state: string; description?: string }[] = [];
   private nextPrNumber = 1;
+  private nextWorkflowRunId = 1;
+  private nextDeploymentId = 1;
 
   async listRepositories(): Promise<GitHubRepositoryRef[]> {
     return [];
@@ -216,8 +421,21 @@ export class InMemoryGitHubAdapter implements GitHubAdapter {
     return this.diffs.get(pr.number) ?? "";
   }
 
-  async listChecks(_pr: GitHubPullRequestRef): Promise<GitHubCheckRun[]> {
-    return [];
+  async listChecks(pr: GitHubPullRequestRef): Promise<GitHubCheckRun[]> {
+    const existing = this.pullRequests.find((p) => p.number === pr.number);
+    if (!existing) return [];
+    return this.checksByBranch.get(existing.headBranch) ?? [];
+  }
+
+  async getPullRequestByBranch(
+    _repo: GitHubRepositoryRef,
+    headBranch: string
+  ): Promise<GitHubPullRequest | null> {
+    return this.pullRequests.find((p) => p.headBranch === headBranch && p.state === "open") ?? null;
+  }
+
+  async getBranchHead(_repo: GitHubRepositoryRef, branch: string): Promise<string | null> {
+    return this.branchHeads.get(branch) ?? null;
   }
 
   async commentOnPullRequest(pr: GitHubPullRequestRef, body: string): Promise<void> {
@@ -230,6 +448,99 @@ export class InMemoryGitHubAdapter implements GitHubAdapter {
       existing.state = "merged";
       this.mergedBranches.push({ repo: { owner: pr.owner, name: pr.name }, branch: existing.headBranch });
     }
+  }
+
+  async dispatchWorkflow(input: {
+    repo: GitHubRepositoryRef;
+    workflowFile: string;
+    ref: string;
+    inputs?: Record<string, string | number>;
+  }): Promise<void> {
+    this.dispatchedWorkflows.push({
+      repo: input.repo,
+      workflowFile: input.workflowFile,
+      ref: input.ref,
+      inputs: input.inputs
+    });
+    const id = this.nextWorkflowRunId++;
+    const run: GitHubWorkflowRun = {
+      id,
+      name: input.workflowFile,
+      headBranch: input.ref,
+      status: "completed",
+      conclusion: this.workflowConclusions.length > 0
+        ? (this.workflowConclusions.shift() as GitHubWorkflowRun["conclusion"])
+        : "success",
+      url: `https://github.invalid/${input.repo.owner}/${input.repo.name}/actions/runs/${id}`
+    };
+    this.workflowRuns.push(run);
+  }
+
+  async listWorkflowRuns(
+    _repo: GitHubRepositoryRef,
+    filter?: { workflowFile?: string; headBranch?: string; headSha?: string }
+  ): Promise<GitHubWorkflowRun[]> {
+    return this.workflowRuns.filter(
+      (run) =>
+        (filter?.workflowFile === undefined || run.name === filter.workflowFile) &&
+        (filter?.headBranch === undefined || run.headBranch === filter.headBranch) &&
+        (filter?.headSha === undefined || run.headSha === filter.headSha)
+    );
+  }
+
+  async createDeployment(input: {
+    repo: GitHubRepositoryRef;
+    ref: string;
+    environment: string;
+    description?: string;
+  }): Promise<GitHubDeployment> {
+    const deployment: GitHubDeployment = {
+      id: this.nextDeploymentId++,
+      ref: input.ref,
+      environment: input.environment
+    };
+    this.deployments.push({ repo: input.repo, deployment, description: input.description });
+    return deployment;
+  }
+
+  async createDeploymentStatus(input: {
+    repo: GitHubRepositoryRef;
+    deploymentId: number;
+    state: "success" | "failure" | "error" | "in_progress";
+    description?: string;
+  }): Promise<void> {
+    this.deploymentStatuses.push({
+      deploymentId: input.deploymentId,
+      state: input.state,
+      description: input.description
+    });
+  }
+
+  async getLatestDeploymentStatus(
+    _repo: GitHubRepositoryRef,
+    deploymentId: number
+  ): Promise<GitHubDeploymentStatus | null> {
+    const statuses = this.deploymentStatuses.filter((s) => s.deploymentId === deploymentId);
+    const latest = statuses[statuses.length - 1];
+    return latest ? { state: latest.state, description: latest.description } : null;
+  }
+
+  /** Test helper: clear all recorded state (counters included). */
+  reset(): void {
+    this.pullRequests.length = 0;
+    this.comments.length = 0;
+    this.mergedBranches.length = 0;
+    this.diffs.clear();
+    this.checksByBranch.clear();
+    this.branchHeads.clear();
+    this.workflowRuns.length = 0;
+    this.dispatchedWorkflows.length = 0;
+    this.workflowConclusions.length = 0;
+    this.deployments.length = 0;
+    this.deploymentStatuses.length = 0;
+    this.nextPrNumber = 1;
+    this.nextWorkflowRunId = 1;
+    this.nextDeploymentId = 1;
   }
 }
 
@@ -316,6 +627,7 @@ export function parseGitHubWebhook(event: string, payload: Record<string, unknow
       action:
         asString(payload.action) ?? asString(deployment?.state) ?? asString(payload.state),
       repository,
+      branch: asString(run?.head_branch),
       headSha: asString(run?.head_sha) ?? asString(payload.sha) ?? undefined,
       conclusion: asString(run?.conclusion) ?? asString(payload.conclusion),
       issueKey: extractIssueKey(asString(run?.head_branch))

@@ -10,3 +10,5 @@ export * from "./review-agents";
 export * from "./review-domains";
 export * from "./quality-gate-agent";
 export * from "./scanners";
+export * from "./poll";
+export * from "./deployment-agents";

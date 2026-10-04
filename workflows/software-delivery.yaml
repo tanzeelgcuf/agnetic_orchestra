@@ -6,10 +6,14 @@
 # noop in tests/unconfigured environments). Phase 5 wires the reviews stage to
 # four real review agents. Phase 6 wires the quality gate to the deterministic
 # Quality Gate Agent with a rework edge back to development (§49, bounded by
-# max_rework). Deployment remains noop until Phase 7.
+# max_rework). Phase 7 wires merge (real MergeAgent: waits for green checks,
+# merges behind human approval), a static production approval gate, the
+# Deployment Agent (GitHub Actions dispatch; a smoke-test failure reworks back
+# to deployment, which rolls back to the previous known-good ref, bounded by
+# max_rework), and the Verification Agent (smoke tests).
 
 name: software-delivery
-description: Requirements -> approval -> development -> parallel review -> gate (rework loop) -> approval -> merge -> deploy -> verify
+description: Requirements -> approval -> development -> parallel review -> gate (rework loop) -> approval -> merge -> production approval -> deploy (rollback loop) -> verify
 
 stages:
   - id: requirements
@@ -45,13 +49,34 @@ stages:
     depends_on: [quality-gate]
 
   - id: merge
-    agent: noop-agent
-    depends_on: [human-approval]
+    agent: merge-agent
+    # development is a direct dep so the PR the Development Agent created
+    # (metadata.prUrl) is visible to the merge stage.
+    depends_on: [human-approval, development]
+    max_attempts: 3
+    timeout_ms: 1800000
 
-  - id: deployment
-    agent: noop-agent
+  - id: production-approval
+    # Static production approval gate (Phase 7); the DeploymentAgent's
+    # environment policy mirrors it in metadata.
+    type: approval
     depends_on: [merge]
 
+  - id: deployment
+    agent: deployment-agent
+    depends_on: [production-approval]
+    input:
+      environment: production
+      workflow_file: deploy.yml
+    max_attempts: 2
+    timeout_ms: 1800000
+
   - id: verification
-    agent: noop-agent
+    agent: verification-agent
     depends_on: [deployment]
+    # Smoke-test failure -> rework -> rollback deploy of the previous
+    # known-good ref (captured by the MergeAgent). One rollback; exhausted
+    # budget fails the run for human investigation.
+    rework_to: deployment
+    max_rework: 1
+    timeout_ms: 300000

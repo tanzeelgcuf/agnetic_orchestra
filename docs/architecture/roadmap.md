@@ -73,19 +73,26 @@ verification are all in place.
 - [x] Review consensus policy (§26): the PolicyEngine decides blocking — a
       single high/critical security finding blocks the run; configurable
       per domain/severity
-- [ ] Fix-iterate loop (findings → back to the Development Agent → re-review)
-      — lands with the Phase 6 quality gate
+- [x] Fix-iterate loop (findings → back to the Development Agent → re-review)
+      — landed with the Phase 6 quality gate
 
-## Phase 6 — Quality gates
+## Phase 6 — Quality gates  *(complete — verified 2026-10-04)*
 
-- [ ] Quality Gate Agent: deterministic aggregation of reviews + CI + SAST + coverage
-- [ ] Policy engine per-repository blocking rules
-- [ ] Semgrep/CodeQL/Gitleaks/Trivy integrations feeding the security agent
+- [x] Quality Gate Agent: deterministic aggregation of reviews + CI + SAST + coverage
+- [x] Policy engine per-repository blocking rules
+- [x] Semgrep/Gitleaks integrations feeding the security agent
+- [x] Rework loop: quality-gate → development rework edge, bounded rework
+      budget, rework_count persisted on workflow_runs (§49 fix-iterate)
 
-## Phase 7 — Deployment
+## Phase 7 — Deployment  *(complete — verified 2026-10-05)*
 
-- [ ] Deployment Agent over GitHub Actions
-- [ ] Environment policies, production approval gate, smoke tests, rollback
+- [x] Deployment Agent over GitHub Actions (workflow_dispatch + polling;
+      GitHub Deployment + status records)
+- [x] Environment policies (per-environment approval + blocking rules),
+      production approval gate, MergeAgent (waits for green checks, merges
+      behind human approval), VerificationAgent smoke tests, rollback to the
+      previous known-good ref on smoke failure (rework edge), webhook-driven
+      CI status correlation into run context
 
 ## Phase 8 — Production hardening
 

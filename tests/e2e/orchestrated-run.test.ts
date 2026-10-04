@@ -11,16 +11,25 @@ import {
   ArchitectureReviewAgent,
   CodeReviewAgent,
   DEFAULT_BLOCKING_RULES,
+  DEFAULT_ENVIRONMENT_POLICIES,
+  DeploymentAgent,
   DevelopmentAgent,
+  MergeAgent,
   NoopAgent,
   PolicyEngine,
   QualityGateAgent,
   RequirementsAgent,
   SecurityReviewAgent,
   TestReviewAgent,
-  ToolRegistry
+  ToolRegistry,
+  VerificationAgent
 } from "@orchestra/agents";
-import { InMemoryJiraAdapter, registerJiraTools } from "@orchestra/integrations";
+import {
+  InMemoryGitHubAdapter,
+  InMemoryJiraAdapter,
+  registerGitHubTools,
+  registerJiraTools
+} from "@orchestra/integrations";
 import { createDiffTool } from "@orchestra/integrations";
 import { loadWorkflows, WorkflowExecutor } from "@orchestra/workflow-engine";
 import { NoopExecutor } from "@orchestra/claude-code";
@@ -47,6 +56,7 @@ describe.skipIf(!pgUp)("orchestrated run against PostgreSQL", () => {
   let queue: PostgresQueue;
   let executor: WorkflowExecutor;
   let repoDir: string;
+  let github: InMemoryGitHubAdapter;
   const tempDirs: string[] = [];
 
   beforeAll(async () => {
@@ -66,6 +76,17 @@ describe.skipIf(!pgUp)("orchestrated run against PostgreSQL", () => {
     registry.register(new ArchitectureReviewAgent({ policy }));
     registry.register(new TestReviewAgent({ policy }));
     registry.register(new QualityGateAgent(policy));
+
+    // Delivery agents (Phase 7): the in-memory GitHub adapter backs the merge
+    // (PR creation via the github tools + merge behind human approval), the
+    // GitHub Actions dispatch, and the deployment records.
+    github = new InMemoryGitHubAdapter();
+    registry.register(new MergeAgent({ github, pollIntervalMs: 1 }));
+    registry.register(
+      new DeploymentAgent({ github, envPolicies: DEFAULT_ENVIRONMENT_POLICIES, pollIntervalMs: 1 })
+    );
+    registry.register(new VerificationAgent({ github }));
+
     registry.register(new NoopAgent());
     registry.register(new NoopAgent("noop-review-agent", "Noop Review Agent"));
     registry.register(new NoopAgent("noop-security-agent", "Noop Security Agent"));
@@ -83,6 +104,7 @@ Given a valid reset link, when the user submits a new password, then access is u
       status: "todo"
     });
     registerJiraTools(tools, jira);
+    registerGitHubTools(tools, github);
 
     // A real git repo with prepared branches so review agents have a diff.
     repoDir = mkdtempSync(join(tmpdir(), "orchestra-e2e-repo-"));
@@ -121,6 +143,7 @@ Given a valid reset link, when the user submits a new password, then access is u
     await pool.query(
       "TRUNCATE workflow_runs, stage_runs, workflow_events, approvals, queue_messages, audit_events"
     );
+    github.reset();
   });
 
   afterAll(async () => {
@@ -141,10 +164,11 @@ Given a valid reset link, when the user submits a new password, then access is u
     throw new Error("drain exceeded max passes");
   }
 
-  it("drives the software-delivery workflow through both human approval gates", async () => {
+  it("drives the software-delivery workflow through all three approval gates", async () => {
     const run = await executor.startRun("software-delivery", {
       issue_key: "PROJ-123",
       repo_path: repoDir,
+      repo: { owner: "e2e", name: "repo" },
       branch: "orchestra/e2e-clean",
       base_branch: "main"
     });
@@ -168,7 +192,7 @@ Given a valid reset link, when the user submits a new password, then access is u
     });
     await drainUntilParked();
 
-    // Parked at the final human approval gate; reviews ran for real.
+    // Parked at the human approval gate; reviews ran for real.
     current = await store.getRun(run.id);
     expect(current?.status).toBe("running");
     const finalApproval = await store.getApproval(run.id, "human-approval");
@@ -192,6 +216,26 @@ Given a valid reset link, when the user submits a new password, then access is u
     });
     await drainUntilParked();
 
+    // Parked at the production approval gate; the merge agent merged the PR
+    // the development agent created.
+    current = await store.getRun(run.id);
+    expect(current?.status).toBe("running");
+    const prodApproval = await store.getApproval(run.id, "production-approval");
+    expect(prodApproval?.decision).toBe("pending");
+    const mergeStage = await store.getStageRun(run.id, "merge");
+    expect(mergeStage?.status).toBe("succeeded");
+    const mergeMeta = (mergeStage?.output as { metadata?: { merged?: boolean; previousRef?: string } })?.metadata;
+    expect(mergeMeta?.merged).toBe(true);
+    expect(github.mergedBranches.map((m) => m.branch)).toContain("orchestra/e2e-clean");
+
+    await queue.enqueue("approval.decision", {
+      runId: run.id,
+      stageId: "production-approval",
+      decision: "approved",
+      approvedBy: "e2e"
+    });
+    await drainUntilParked();
+
     current = await store.getRun(run.id);
     expect(current?.status).toBe("succeeded");
 
@@ -210,14 +254,23 @@ Given a valid reset link, when the user submits a new password, then access is u
         "quality-gate",
         "human-approval",
         "merge",
+        "production-approval",
         "deployment",
         "verification"
       ].sort()
     );
     expect(stages.every((s) => s.status === "succeeded")).toBe(true);
 
+    const deployStage = await store.getStageRun(run.id, "deployment");
+    const deployMeta = (deployStage?.output as { metadata?: Record<string, unknown> })?.metadata;
+    expect(deployMeta?.environment).toBe("production");
+    expect(deployMeta?.rollback).toBe(false);
+    // The in-memory adapter dispatched the deploy workflow and recorded it.
+    expect(github.dispatchedWorkflows).toHaveLength(1);
+    expect(github.deploymentStatuses.map((s) => s.state)).toEqual(["success"]);
+
     const events = await store.listEvents(run.id);
-    expect(events.map((e) => e.type).filter((t) => t === "approval.requested")).toHaveLength(2);
+    expect(events.map((e) => e.type).filter((t) => t === "approval.requested")).toHaveLength(3);
     expect(events.map((e) => e.type)).toContain("workflow.succeeded");
     expect(await queue.pendingCount()).toBe(0);
   });
@@ -284,6 +337,58 @@ Given a valid reset link, when the user submits a new password, then access is u
     expect(reworkEvents).toHaveLength(2);
     // Merge and deployment never ran.
     expect(await store.getStageRun(run.id, "merge")).toBeNull();
+  });
+
+  it("fails the run when the deploy workflow keeps failing", async () => {
+    const run = await executor.startRun("software-delivery", {
+      issue_key: "PROJ-123",
+      repo_path: repoDir,
+      repo: { owner: "e2e", name: "repo" },
+      branch: "orchestra/e2e-clean",
+      base_branch: "main"
+    });
+
+    // The deploy workflow fails on both attempts (max_attempts: 2).
+    github.workflowConclusions.push("failure", "failure");
+
+    await drainUntilParked(500); // parks at requirements-approval
+    await queue.enqueue("approval.decision", {
+      runId: run.id,
+      stageId: "requirements-approval",
+      decision: "approved",
+      approvedBy: "e2e"
+    });
+    await drainUntilParked(500); // parks at human-approval
+    await queue.enqueue("approval.decision", {
+      runId: run.id,
+      stageId: "human-approval",
+      decision: "approved",
+      approvedBy: "e2e"
+    });
+    await drainUntilParked(500); // parks at production-approval
+    await queue.enqueue("approval.decision", {
+      runId: run.id,
+      stageId: "production-approval",
+      decision: "approved",
+      approvedBy: "e2e"
+    });
+
+    // The deploy retry is enqueued with backoff delay; keep draining until
+    // the run fails.
+    const deadline = Date.now() + 30_000;
+    let current = await store.getRun(run.id);
+    while (current?.status !== "failed" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await drainUntilParked(500);
+      current = await store.getRun(run.id);
+    }
+
+    expect(current?.status).toBe("failed");
+    const deployStage = await store.getStageRun(run.id, "deployment");
+    expect(deployStage?.status).toBe("failed");
+    // Verification never ran — the failed deployment failed the run.
+    expect(await store.getStageRun(run.id, "verification")).toBeNull();
+    expect(github.dispatchedWorkflows).toHaveLength(2);
   });
 
   it("recovers non-terminal runs on boot", async () => {
