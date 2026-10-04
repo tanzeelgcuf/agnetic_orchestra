@@ -15,6 +15,7 @@ export const workflowRuns = pgTable("workflow_runs", {
   definition: text("definition").notNull(),
   status: text("status").notNull().default("pending"),
   context: jsonb("context").notNull().default({}),
+  reworkCount: integer("rework_count").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
 });

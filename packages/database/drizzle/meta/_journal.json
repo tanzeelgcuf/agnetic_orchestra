@@ -22,6 +22,13 @@
       "when": 1791046667742,
       "tag": "0002_cool_flatman",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791068381129,
+      "tag": "0003_fair_ink",
+      "breakpoints": true
     }
   ]
 }

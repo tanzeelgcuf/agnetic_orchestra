@@ -3,10 +3,13 @@ import type { AgentResult, Finding, PermissionSet, Severity } from "@orchestra/s
 import type { Agent, AgentContext, Tool, ValidationResult } from "./contract";
 import type { LlmClient } from "./llm";
 import type { PolicyEngine } from "./policy";
+import type { ExternalScanner } from "./scanners";
 
 export interface ReviewAgentDeps {
   llm?: LlmClient;
   policy: PolicyEngine;
+  /** External deterministic scanners (gitleaks, semgrep) — Phase 6. */
+  scanners?: ExternalScanner[];
 }
 
 const LlmFindingSchema = z.object({
@@ -340,6 +343,17 @@ export abstract class BaseReviewAgent implements Agent {
     const requirementSummary = this.requirementSummary(dependencies);
     const builtin = this.builtinScan(diff);
 
+    // External deterministic scanners (§7) run alongside the builtin layer.
+    const externalFindings: Finding[] = [];
+    for (const scanner of this.deps.scanners ?? []) {
+      if (!scanner.available()) continue;
+      try {
+        externalFindings.push(...(await scanner.scan({ diff, repoPath: this.repoPath(dependencies, ctx) })));
+      } catch (e) {
+        ctx.logger.warn({ err: e, scanner: scanner.name }, "external scanner failed (non-fatal)");
+      }
+    }
+
     let llmFindings: Finding[] = [];
     if (this.deps.llm) {
       const raw = await this.deps.llm.complete({
@@ -349,7 +363,7 @@ export abstract class BaseReviewAgent implements Agent {
       llmFindings = parseReviewFindings(raw, this.agentId, this.domain);
     }
 
-    const findings = dedupeFindings([...builtin, ...llmFindings]);
+    const findings = dedupeFindings([...builtin, ...externalFindings, ...llmFindings]);
     const decision = this.deps.policy.evaluate(findings);
     const review =
       decision.action === "block" ? "FAIL" : findings.length > 0 ? "NEEDS_CHANGES" : "PASS";
@@ -403,6 +417,13 @@ export abstract class BaseReviewAgent implements Agent {
     }
     if (typeof reqOutput?.summary === "string") return reqOutput.summary;
     return "(none)";
+  }
+
+  private repoPath(
+    dependencies: Record<string, unknown> | undefined,
+    ctx: AgentContext
+  ): string | undefined {
+    return firstString(ctx.input.repo_path, ctx.workflowContext.repo_path) ?? undefined;
   }
 }
 

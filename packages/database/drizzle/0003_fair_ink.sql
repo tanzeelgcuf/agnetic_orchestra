@@ -1,0 +1,1 @@
+ALTER TABLE "workflow_runs" ADD COLUMN "rework_count" integer DEFAULT 0 NOT NULL;

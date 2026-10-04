@@ -14,6 +14,7 @@ import {
   DevelopmentAgent,
   NoopAgent,
   PolicyEngine,
+  QualityGateAgent,
   RequirementsAgent,
   SecurityReviewAgent,
   TestReviewAgent,
@@ -64,6 +65,7 @@ describe.skipIf(!pgUp)("orchestrated run against PostgreSQL", () => {
     registry.register(new SecurityReviewAgent({ policy }));
     registry.register(new ArchitectureReviewAgent({ policy }));
     registry.register(new TestReviewAgent({ policy }));
+    registry.register(new QualityGateAgent(policy));
     registry.register(new NoopAgent());
     registry.register(new NoopAgent("noop-review-agent", "Noop Review Agent"));
     registry.register(new NoopAgent("noop-security-agent", "Noop Security Agent"));
@@ -97,6 +99,10 @@ Given a valid reset link, when the user submits a new password, then access is u
     git("git checkout -q main && git checkout -q -b orchestra/e2e-dirty");
     writeFileSync(join(repoDir, "config.ts"), "export const SECRET = 'super-secret-value-123';\n");
     git("git add . && git commit -q -m 'PROJ-123: add config'");
+    // Rework branch: an empty catch (code review NEEDS_CHANGES, non-blocking).
+    git("git checkout -q main && git checkout -q -b orchestra/e2e-rework");
+    writeFileSync(join(repoDir, "handler.ts"), "try { risky(); } catch (e) {}\n");
+    git("git add . && git commit -q -m 'PROJ-123: add handler'");
 
     tools.register(createDiffTool({}));
 
@@ -242,6 +248,40 @@ Given a valid reset link, when the user submits a new password, then access is u
     expect(securityStage?.status).toBe("blocked");
     const events = await store.listEvents(run.id);
     expect(events.map((e) => e.type)).toContain("workflow.blocked");
+    // Merge and deployment never ran.
+    expect(await store.getStageRun(run.id, "merge")).toBeNull();
+  });
+
+  it("reworks through the quality gate until the rework budget is exhausted", async () => {
+    const run = await executor.startRun("software-delivery", {
+      issue_key: "PROJ-123",
+      repo_path: repoDir,
+      branch: "orchestra/e2e-rework",
+      base_branch: "main"
+    });
+
+    // Approve requirements-approval to reach the gate. The diff's empty catch
+    // makes the code review NEEDS_CHANGES; the gate fails with rework; the
+    // development subtree re-runs — twice (max_rework: 2) — then the budget
+    // exhausts and the run fails (the reworked diff never changes).
+    await drainUntilParked(500); // parks at requirements-approval
+    await queue.enqueue("approval.decision", {
+      runId: run.id,
+      stageId: "requirements-approval",
+      decision: "approved",
+      approvedBy: "e2e"
+    });
+    await drainUntilParked(500);
+
+    const current = await store.getRun(run.id);
+    expect(current?.status).toBe("failed");
+    expect(current?.reworkCount).toBe(2);
+    // The development stage re-ran after each rework (attempts reset by the rework).
+    const events = await store.listEvents(run.id);
+    const reworkEvents = events.filter(
+      (e) => e.type === "stage.retried" && (e.data as { rework?: boolean })?.rework === true
+    );
+    expect(reworkEvents).toHaveLength(2);
     // Merge and deployment never ran.
     expect(await store.getStageRun(run.id, "merge")).toBeNull();
   });

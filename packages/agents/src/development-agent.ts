@@ -76,6 +76,7 @@ export class DevelopmentAgent implements Agent {
     const prRepo = input.repo as { owner?: unknown; name?: unknown } | undefined;
 
     const requirement = this.extractRequirement(ctx);
+    const reworkFindings = this.extractReworkFindings(ctx);
 
     const session = await this.deps.executor.createSession({
       workspaceDir: workspaceDir ?? repoPath
@@ -83,11 +84,20 @@ export class DevelopmentAgent implements Agent {
 
     const tasks: DevTaskRecord[] = [];
 
+    const reworkBlock = reworkFindings.length > 0
+      ? [
+          "",
+          "REWORK REQUIRED — a previous pass failed review. Fix these findings first:",
+          ...reworkFindings.map((f) => `- [${f.severity}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}: ${f.description}`)
+        ]
+      : [];
+
     const plan = await this.runTask(ctx, session, tasks, "plan", {
       prompt: [
         "You are the planning step of a Development Agent. Inspect the repository in your working directory and understand the existing architecture before proposing anything.",
         "Produce a concise implementation plan (files to touch, in what order, and how to verify) for the requirement below. Do not modify any files in this step.",
         UNTRUSTED_WARNING,
+        ...reworkBlock,
         "",
         `Requirement (${issueKey}):`,
         requirement
@@ -102,6 +112,7 @@ export class DevelopmentAgent implements Agent {
         "Then run the project's tests, lint, and type checks and fix every problem you find. Never claim success without verification.",
         "Do not commit and do not push in this step.",
         UNTRUSTED_WARNING,
+        ...reworkBlock,
         "",
         `Requirement (${issueKey}):`,
         requirement,
@@ -146,6 +157,22 @@ export class DevelopmentAgent implements Agent {
         llmExecutor: "headless-claude-code"
       }
     };
+  }
+
+  /** Review findings recorded by the rework loop (§49) in the run context. */
+  private extractReworkFindings(ctx: AgentContext): Finding[] {
+    const raw = ctx.input.rework_findings ?? ctx.workflowContext.rework_findings;
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((f): f is Finding => {
+      if (!f || typeof f !== "object") return false;
+      const finding = f as { severity?: unknown; title?: unknown; description?: unknown; source?: unknown };
+      return (
+        typeof finding.severity === "string" &&
+        typeof finding.title === "string" &&
+        typeof finding.description === "string" &&
+        typeof finding.source === "string"
+      );
+    });
   }
 
   private extractRequirement(ctx: AgentContext): string {

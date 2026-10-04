@@ -15,6 +15,7 @@ import type {
   ToolRegistry
 } from "@orchestra/agents";
 import type { TaskQueue } from "@orchestra/event-bus";
+import { transitiveDependents } from "./graph";
 import type { StageDefinition, WorkflowDefinition } from "./definition";
 
 const BACKOFF_BASE_MS = 1_000;
@@ -110,20 +111,24 @@ export class WorkflowExecutor {
 
     // Ready = stages whose dependencies are satisfied. An existing stage is
     // re-picked only when this advance is its scheduled retry, or when it was
-    // created but never started (crash between create and run). Retries
-    // otherwise wait for their own delayed message so backoff is honored.
+    // created/reset but never started AND its dependencies are satisfied
+    // (rework resets stages to pending — they must not run before their deps
+    // re-run). Retries otherwise wait for their own delayed message so
+    // backoff is honored.
+    const depsSatisfied = (stage: StageDefinition): boolean =>
+      stage.depends_on.every((dep) => {
+        const depRun = byStageId.get(dep);
+        return depRun !== undefined && (depRun.status === "succeeded" || depRun.status === "skipped");
+      });
     const ready = def.stages.filter((stage) => {
       const existing = byStageId.get(stage.id);
       if (existing) {
         return (
           stage.id === retryStageId ||
-          (existing.status === "pending" && existing.attempts === 0)
+          (existing.status === "pending" && existing.attempts === 0 && depsSatisfied(stage))
         );
       }
-      return stage.depends_on.every((dep) => {
-        const depRun = byStageId.get(dep);
-        return depRun !== undefined && (depRun.status === "succeeded" || depRun.status === "skipped");
-      });
+      return depsSatisfied(stage);
     });
 
     if (ready.length === 0) {
@@ -162,9 +167,22 @@ export class WorkflowExecutor {
       return;
     }
 
-    // Barriers complete instantly (their deps are satisfied by definition).
+    // Barriers complete instantly (their deps are satisfied by definition)
+    // and aggregate their members' outputs + findings, so downstream stages
+    // (e.g. the quality gate) see the group's results.
     for (const stage of barriersReady) {
-      await store.createStageRun({
+      const memberOutputs: Record<string, unknown> = {};
+      const memberFindings: Finding[] = [];
+      for (const dep of stage.depends_on) {
+        const depRun = await store.getStageRun(run.id, dep);
+        if (!depRun) continue;
+        memberOutputs[dep] = depRun.output ?? { status: depRun.status };
+        const output = depRun.output as { findings?: Finding[] } | undefined;
+        if (Array.isArray(output?.findings)) {
+          memberFindings.push(...output.findings);
+        }
+      }
+      const barrierRun = await store.createStageRun({
         runId: run.id,
         stageId: stage.id,
         agent: "(barrier)",
@@ -172,11 +190,22 @@ export class WorkflowExecutor {
         kind: "agent",
         status: "succeeded"
       });
+      // createStageRun may return an existing row (rework reset it to
+      // pending) — always set the status, not just the output.
+      await store.updateStageRun(barrierRun.id, {
+        status: "succeeded",
+        output: {
+          summary: "parallel group complete",
+          findings: memberFindings,
+          members: memberOutputs
+        },
+        finishedAt: new Date().toISOString()
+      });
       await store.appendEvent({
         type: "stage.succeeded",
         runId: run.id,
         stageId: stage.id,
-        data: { barrier: true }
+        data: { barrier: true, findings: memberFindings.length }
       });
     }
 
@@ -309,7 +338,8 @@ export class WorkflowExecutor {
           output: {
             summary: result.summary,
             metadata: result.metadata ?? null,
-            artifacts: result.artifacts ?? []
+            artifacts: result.artifacts ?? [],
+            findings: result.findings ?? []
           },
           finishedAt: new Date().toISOString()
         });
@@ -393,6 +423,14 @@ export class WorkflowExecutor {
     const attempts = stageRun.attempts + 1;
     await store.updateStageRun(stageRun.id, { attempts });
 
+    // Rework edge (§49 fix-iterate): a stage with rework_to skips stage-level
+    // retries — its failure re-runs the rework target's subtree, bounded by
+    // max_rework at run level.
+    if (stage.rework_to) {
+      await this.handleRework(run, stage, message, extra?.findings ?? []);
+      return;
+    }
+
     if (attempts < stage.max_attempts) {
       const backoffMs = BACKOFF_BASE_MS * 2 ** (attempts - 1);
       await store.updateStageRun(stageRun.id, { status: "pending", error: message });
@@ -438,6 +476,64 @@ export class WorkflowExecutor {
       data: { reason }
     });
     this.deps.logger.error({ runId: run.id, reason }, "workflow failed");
+  }
+
+  /**
+   * Rework (§49): reset the rework target and everything downstream of it back
+   * to pending, record the findings in the run context (so the re-run stages
+   * receive them), and re-enqueue. Bounded by max_rework; exhausted → fail.
+   */
+  private async handleRework(
+    run: Run,
+    stage: StageDefinition,
+    reason: string,
+    findings: Finding[]
+  ): Promise<void> {
+    const { store, definitions, queue, logger } = this.deps;
+    const def = definitions[run.definition];
+    const target = stage.rework_to;
+    if (!def || !target || run.reworkCount >= stage.max_rework) {
+      await this.failRun(
+        run,
+        `rework budget exhausted for stage "${stage.id}" (${run.reworkCount}/${stage.max_rework}): ${reason}`
+      );
+      return;
+    }
+
+    // Fresh run state (reworkCount may have changed concurrently).
+    const fresh = (await store.getRun(run.id)) ?? run;
+    if (fresh.reworkCount >= stage.max_rework) {
+      await this.failRun(
+        run,
+        `rework budget exhausted for stage "${stage.id}" (${fresh.reworkCount}/${stage.max_rework}): ${reason}`
+      );
+      return;
+    }
+
+    await store.updateRunStatus(run.id, "running");
+    const reworkedStages = transitiveDependents(def.stages, target);
+    await store.resetStageRuns(run.id, reworkedStages);
+    const reworkCount = await store.incrementReworkCount(run.id);
+    await store.updateRunContext(run.id, {
+      rework_findings: findings,
+      rework_reason: reason
+    });
+    await store.appendEvent({
+      type: "stage.retried",
+      runId: run.id,
+      stageId: stage.id,
+      data: { rework: true, to: target, findings, reason }
+    });
+    await store.appendAudit("system", "stage.rework", `workflow_run/${run.id}`, {
+      stageId: stage.id,
+      to: target,
+      reworkCount
+    });
+    await queue.enqueue("run.advance", { runId: run.id });
+    logger.warn(
+      { runId: run.id, stageId: stage.id, to: target, reworkCount, findings: findings.length },
+      "rework scheduled"
+    );
   }
 
   private async applyApprovalDecision(payload: Record<string, unknown>): Promise<void> {

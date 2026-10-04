@@ -2,13 +2,14 @@
 #
 # Phase 2 wires the requirements stage to the real Requirements Agent (Jira +
 # LLM reasoning, heuristic fallback) behind a requirements approval gate.
-# Phase 4 wires the development stage to the Development Agent (headless
-# Claude Code; noop in tests/unconfigured environments). Reviews remain noop:
-# review fan-out lands in Phase 5, the quality gate in Phase 6, deployment in
-# Phase 7.
+# Phase 4 wires development to the Development Agent (headless Claude Code;
+# noop in tests/unconfigured environments). Phase 5 wires the reviews stage to
+# four real review agents. Phase 6 wires the quality gate to the deterministic
+# Quality Gate Agent with a rework edge back to development (§49, bounded by
+# max_rework). Deployment remains noop until Phase 7.
 
 name: software-delivery
-description: Requirements -> approval -> development -> parallel review -> gate -> approval -> merge -> deploy -> verify
+description: Requirements -> approval -> development -> parallel review -> gate (rework loop) -> approval -> merge -> deploy -> verify
 
 stages:
   - id: requirements
@@ -34,7 +35,9 @@ stages:
     depends_on: [development]
 
   - id: quality-gate
-    agent: noop-agent
+    agent: quality-gate-agent
+    rework_to: development
+    max_rework: 2
     depends_on: [reviews]
 
   - id: human-approval

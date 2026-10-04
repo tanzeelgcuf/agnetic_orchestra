@@ -10,7 +10,11 @@ const RawStageSchema = z.object({
   depends_on: z.array(z.string().min(1)).default([]),
   max_attempts: z.number().int().positive().max(10).default(3),
   timeout_ms: z.number().int().positive().default(300_000),
-  input: z.record(z.unknown()).default({})
+  input: z.record(z.unknown()).default({}),
+  /** Failure edge (§49 fix-iterate): on failure, reset this stage + its
+   * dependents back to pending and re-run, bounded by max_rework. */
+  rework_to: z.string().min(1).optional(),
+  max_rework: z.number().int().nonnegative().max(5).default(1)
 });
 
 const RawDefinitionSchema = z.object({
@@ -27,6 +31,8 @@ export interface StageDefinition {
   max_attempts: number;
   timeout_ms: number;
   input: Record<string, unknown>;
+  rework_to?: string;
+  max_rework: number;
 }
 
 export interface WorkflowDefinition {
@@ -74,7 +80,8 @@ export function parseWorkflowDefinition(yaml: string): WorkflowDefinition {
           depends_on: [...stage.depends_on],
           max_attempts: stage.max_attempts,
           timeout_ms: stage.timeout_ms,
-          input: stage.input
+          input: stage.input,
+          max_rework: stage.max_rework
         });
       }
       stages.push({
@@ -83,13 +90,17 @@ export function parseWorkflowDefinition(yaml: string): WorkflowDefinition {
         depends_on: stage.parallel.map((a) => `${stage.id}:${a}`),
         max_attempts: 1,
         timeout_ms: stage.timeout_ms,
-        input: {}
+        input: {},
+        max_rework: 0
       });
       continue;
     }
 
     if (stage.type === "agent" && !stage.agent) {
       throw new ValidationError(`stage "${stage.id}" must specify an agent`);
+    }
+    if (stage.type !== "agent" && stage.rework_to) {
+      throw new ValidationError(`rework_to is only valid on agent stages ("${stage.id}")`);
     }
     stages.push({
       id: stage.id,
@@ -98,7 +109,9 @@ export function parseWorkflowDefinition(yaml: string): WorkflowDefinition {
       depends_on: [...stage.depends_on],
       max_attempts: stage.max_attempts,
       timeout_ms: stage.timeout_ms,
-      input: stage.input
+      input: stage.input,
+      ...(stage.rework_to !== undefined ? { rework_to: stage.rework_to } : {}),
+      max_rework: stage.max_rework
     });
   }
 

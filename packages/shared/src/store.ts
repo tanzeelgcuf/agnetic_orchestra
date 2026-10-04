@@ -10,6 +10,8 @@ export interface Run {
   definition: string;
   status: RunStatus;
   context: Record<string, unknown>;
+  /** Times a rework edge (e.g. quality-gate -> development) has fired. */
+  reworkCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -105,6 +107,18 @@ export interface WorkflowStore {
     resource: string,
     data?: Record<string, unknown>
   ): Promise<void>;
+
+  /** Merge fields into the run's persistent context (§16 shared state). */
+  updateRunContext(runId: string, patch: Record<string, unknown>): Promise<void>;
+
+  /** Increment the run's rework counter; returns the new count. */
+  incrementReworkCount(runId: string): Promise<number>;
+
+  /**
+   * Reset the given stage runs of a run back to `pending` (attempts and
+   * outputs cleared) — used by the rework loop to re-run stages.
+   */
+  resetStageRuns(runId: string, stageIds: string[]): Promise<number>;
 
   listNonTerminalRuns(): Promise<Run[]>;
 }

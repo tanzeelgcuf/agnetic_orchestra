@@ -1,4 +1,4 @@
-import { and, asc, eq, lt, notInArray } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
 import type { OrchestraDb } from "./client";
 import {
   approvals,
@@ -30,6 +30,7 @@ function toRun(row: typeof workflowRuns.$inferSelect): Run {
     definition: row.definition,
     status: row.status as RunStatus,
     context: (row.context ?? {}) as Record<string, unknown>,
+    reworkCount: row.reworkCount,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString()
   };
@@ -260,6 +261,43 @@ export class PgWorkflowStore implements WorkflowStore {
     await this.db
       .insert(auditEvents)
       .values({ actor, action, resource, data: data ?? null });
+  }
+
+  async updateRunContext(runId: string, patch: Record<string, unknown>): Promise<void> {
+    // jsonb merge: patch keys override existing ones.
+    await this.db
+      .update(workflowRuns)
+      .set({
+        context: sql`COALESCE(${workflowRuns.context}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb`,
+        updatedAt: new Date()
+      })
+      .where(eq(workflowRuns.id, runId));
+  }
+
+  async incrementReworkCount(runId: string): Promise<number> {
+    const rows = await this.db
+      .update(workflowRuns)
+      .set({ reworkCount: sql`${workflowRuns.reworkCount} + 1`, updatedAt: new Date() })
+      .where(eq(workflowRuns.id, runId))
+      .returning({ reworkCount: workflowRuns.reworkCount });
+    return rows[0]?.reworkCount ?? 0;
+  }
+
+  async resetStageRuns(runId: string, stageIds: string[]): Promise<number> {
+    if (stageIds.length === 0) return 0;
+    const rows = await this.db
+      .update(stageRuns)
+      .set({
+        status: "pending",
+        attempts: 0,
+        output: null,
+        error: null,
+        startedAt: null,
+        finishedAt: null
+      })
+      .where(and(eq(stageRuns.runId, runId), inArray(stageRuns.stageId, stageIds)))
+      .returning({ id: stageRuns.id });
+    return rows.length;
   }
 
   async listNonTerminalRuns(): Promise<Run[]> {

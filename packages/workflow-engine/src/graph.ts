@@ -8,6 +8,35 @@ export interface GraphValidation {
   order: string[];
 }
 
+/**
+ * A stage and everything downstream of it (transitive dependents) — the set
+ * the rework loop resets before re-running from the target.
+ */
+export function transitiveDependents(stages: StageDefinition[], targetId: string): string[] {
+  const dependents = new Map<string, string[]>();
+  for (const stage of stages) {
+    for (const dep of stage.depends_on) {
+      const list = dependents.get(dep) ?? [];
+      list.push(stage.id);
+      dependents.set(dep, list);
+    }
+  }
+  const out: string[] = [];
+  const queue = [targetId];
+  const seen = new Set<string>(queue);
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    out.push(current);
+    for (const next of dependents.get(current) ?? []) {
+      if (!seen.has(next)) {
+        seen.add(next);
+        queue.push(next);
+      }
+    }
+  }
+  return out;
+}
+
 function topologicalOrder(stages: StageDefinition[]): { order: string[]; cycles: string[][] } {
   const byId = new Map(stages.map((s) => [s.id, s]));
   const state = new Map<string, "visiting" | "done">();
@@ -60,6 +89,9 @@ export function validateGraph(def: WorkflowDefinition, registry: AgentRegistry):
     }
     if (stage.type === "agent" && stage.agent && !registry.has(stage.agent)) {
       errors.push(`stage "${stage.id}" references unregistered agent "${stage.agent}"`);
+    }
+    if (stage.rework_to && !ids.has(stage.rework_to)) {
+      errors.push(`stage "${stage.id}" reworks to unknown stage "${stage.rework_to}"`);
     }
   }
 

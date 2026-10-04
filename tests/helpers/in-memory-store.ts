@@ -38,6 +38,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       definition: input.definition,
       status: "pending",
       context: { ...input.context },
+      reworkCount: 0,
       createdAt: now,
       updatedAt: now
     };
@@ -201,6 +202,38 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     data?: Record<string, unknown>
   ): Promise<void> {
     this.auditRows.push({ actor, action, resource, data });
+  }
+
+  async updateRunContext(runId: string, patch: Record<string, unknown>): Promise<void> {
+    const run = this.runRows.get(runId);
+    if (run) {
+      run.context = { ...run.context, ...patch };
+      run.updatedAt = new Date().toISOString();
+    }
+  }
+
+  async incrementReworkCount(runId: string): Promise<number> {
+    const run = this.runRows.get(runId);
+    if (!run) return 0;
+    run.reworkCount += 1;
+    run.updatedAt = new Date().toISOString();
+    return run.reworkCount;
+  }
+
+  async resetStageRuns(runId: string, stageIds: string[]): Promise<number> {
+    let count = 0;
+    for (const row of this.stageRows.values()) {
+      if (row.runId === runId && stageIds.includes(row.stageId)) {
+        row.status = "pending";
+        row.attempts = 0;
+        row.output = null;
+        row.error = null;
+        row.startedAt = null;
+        row.finishedAt = null;
+        count += 1;
+      }
+    }
+    return count;
   }
 
   async listNonTerminalRuns(): Promise<Run[]> {

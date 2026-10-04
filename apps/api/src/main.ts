@@ -10,9 +10,12 @@ import {
   ArchitectureReviewAgent,
   CodeReviewAgent,
   DevelopmentAgent,
+  GitleaksScanner,
   NoopAgent,
+  QualityGateAgent,
   PolicyEngine,
   RequirementsAgent,
+  SemgrepScanner,
   SecurityReviewAgent,
   TestReviewAgent,
   ToolRegistry
@@ -77,8 +80,11 @@ async function main(): Promise<void> {
   // Diff access for review agents: PR mode (github) or local branch mode.
   tools.register(createDiffTool({ github: githubAdapter }));
 
+  registry.register(new QualityGateAgent(policy));
+  const scanners = [new GitleaksScanner(), new SemgrepScanner()];
+
   registry.register(new CodeReviewAgent({ llm, policy }));
-  registry.register(new SecurityReviewAgent({ llm, policy }));
+  registry.register(new SecurityReviewAgent({ llm, policy, scanners }));
   registry.register(new ArchitectureReviewAgent({ llm, policy }));
   registry.register(new TestReviewAgent({ llm, policy }));
 
