@@ -129,8 +129,8 @@ describe("requirements agent", () => {
 
   it("uses the LLM path when a client is configured and parses its JSON", async () => {
     const fakeLlm: LlmClient = {
-      complete: async ({ user: _user }) =>
-        JSON.stringify({
+      complete: async ({ user: _user }) => ({
+        text: JSON.stringify({
           requirement_summary: "Password reset via emailed link",
           user_stories: ["As a user, I want to reset my password"],
           acceptance_criteria: ["Link expires after one use"],
@@ -139,7 +139,9 @@ describe("requirements agent", () => {
           risks: [],
           implementation_tasks: ["Add reset endpoint"],
           clarifications_required: []
-        })
+        }),
+        usage: { promptTokens: 10, outputTokens: 5 }
+      })
     };
     const jira = new InMemoryJiraAdapter();
     jira.issues.set("PROJ-3", {

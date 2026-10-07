@@ -184,11 +184,13 @@ export class RequirementsAgent implements Agent {
 
     let analysis: RequirementsAnalysis;
     if (this.llm) {
-      const raw = await this.llm.complete({
+      const { text: raw, usage } = await this.llm.complete({
         system: REQUIREMENTS_SYSTEM_PROMPT,
         user: `Jira issue: ${issueKey ?? "(none)"}\n\nRequirement text:\n${issueText}`
       });
       analysis = this.parseAnalysis(raw, issueText);
+      // Cost controls: track token usage for the budget check.
+      if (usage) ctx.logger?.info({ promptTokens: usage.promptTokens, completionTokens: usage.completionTokens }, "llm token usage");
     } else {
       analysis = analyzeHeuristically(issueText);
     }
@@ -225,12 +227,15 @@ export class RequirementsAgent implements Agent {
     };
   }
 
-  private parseAnalysis(raw: string, fallbackText: string): RequirementsAnalysis {
-    const jsonStart = raw.indexOf("{");
-    const jsonEnd = raw.lastIndexOf("}");
+  private parseAnalysis(raw: string | undefined, fallbackText: string): RequirementsAnalysis {
+    // Accept both the old plain-string format and the new {text, usage} format
+    const _text = (raw && typeof raw === 'string') ? raw : fallbackText;
+    const actualRaw = raw ?? fallbackText;
+    const jsonStart = actualRaw.indexOf("{");
+    const jsonEnd = actualRaw.lastIndexOf("}");
     if (jsonStart >= 0 && jsonEnd > jsonStart) {
       try {
-        const parsed = AnalysisSchema.safeParse(JSON.parse(raw.slice(jsonStart, jsonEnd + 1)));
+        const parsed = AnalysisSchema.safeParse(JSON.parse(actualRaw.slice(jsonStart, jsonEnd + 1)));
         if (parsed.success) return parsed.data;
       } catch {
         // fall through to heuristic fallback

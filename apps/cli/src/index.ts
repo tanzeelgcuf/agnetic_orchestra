@@ -50,6 +50,16 @@ workflow
     console.log(`started workflow ${run.id} (${run.definition}) status=${run.status}`);
   });
 
+  workflow
+    .command("dlq replay")
+    .description("Replay dead-lettered messages back to pending")
+    .action(async () => {
+      const replayed = await api<{ ok: boolean; replayed: number }>("/queue/dlq/replay", {
+        method: "POST"
+      });
+      console.log(`replayed ${replayed.replayed} dead message(s)`);
+    });
+
 workflow
   .command("status")
   .description("Show workflow run status with stage timeline")

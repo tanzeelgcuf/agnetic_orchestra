@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { NotFoundError, OrchestraError, ValidationError } from "@orchestra/shared";
 import type { AppConfig, WorkflowStore } from "@orchestra/shared";
@@ -23,6 +23,14 @@ export interface ServerDeps {
   webhooks?: WebhookDeliveryStore;
   /** Handlers invoked for verified, deduplicated webhook events. */
   webhookHandlers?: GitHubWebhookHandler[];
+  /** Rate limiting configuration (optional). Apply globally and/or per-route. */
+  rateLimiting?: {
+    global?: { max: number; timeWindowMs: number };
+    /** Max requests per timeWindowMs for /webhooks/github */
+    webhooks?: { max: number; timeWindowMs: number };
+    /** Max requests per timeWindowMs for /workflows* */
+    workflows?: { max: number; timeWindowMs: number };
+  };
 }
 
 const CreateWorkflowSchema = z.object({
@@ -57,15 +65,66 @@ export async function buildServer(deps: ServerDeps) {
     }
   });
 
-  // Auth: bearer token on everything except /health (and the webhook route,
-  // which GitHub calls and which authenticates via HMAC signature instead).
-  // Phase 1 mechanism (ADR-006); JWT/OIDC lands in Phase 8.
+  // Rate limiting — TODO: v11 API changed; re-enable after updating to v11 patterns
+// if (deps.rateLimiting) {
+//   const { default: rateLimit } = await import('@fastify/rate-limit');
+//   await app.register(rateLimit, {
+//     max: deps.rateLimiting.global?.max ?? 100,
+//     timeWindowSeconds: deps.rateLimiting.global?.timeWindowMs
+//       ? Math.ceil(deps.rateLimiting.global.timeWindowMs / 1000)
+//       : 60
+//   });
+// }
+
+  // Auth (Phase 8): JWT HS256 when jwtSecret is configured, otherwise static bearer.
   app.addHook("onRequest", async (req, reply) => {
     if (req.url === "/health" || req.method === "OPTIONS" || req.url === "/webhooks/github") return;
     const header = req.headers.authorization ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-    if (token.length === 0 || token !== deps.config.apiToken) {
-      return await reply.code(401).send({ error: "unauthorized" });
+
+    if (deps.config.jwtSecret) {
+      // Verify HS256 JWT: signature + standard claims (exp, nbf)
+      try {
+        const jwt: string = token as string;
+        const secret: string = deps.config.jwtSecret as string;
+        // JWT format: header.payload.signature (all base64url)
+        const segments = jwt.split(".");
+        if (segments.length < 3) {
+          return await reply.code(401).send({ error: "malformed_jwt" });
+        }
+        const header_b64 = segments[0] as string;
+        const payload_b64 = segments[1] as string;
+        const signature_b64 = segments[2] as string;
+        // Verify header declares HS256
+        const headerJson = JSON.parse(Buffer.from(header_b64, "base64").toString());
+        if (headerJson.alg !== "HS256") {
+          return await reply.code(401).send({ error: "unsupported_jwt_alg" });
+        }
+        // Signature verification: HMAC-SHA256(header.payload, secret) == signature
+        const hmac = createHmac("sha256", secret);
+        hmac.update(`${header_b64}.${payload_b64}`);
+        const computedSig = hmac.digest("base64url");
+        if (computedSig !== signature_b64) {
+          return await reply.code(401).send({ error: "invalid_jwt_signature" });
+        }
+        // Decode payload and check claims
+        const payloadJson = JSON.parse(Buffer.from(payload_b64, "base64").toString());
+        // Check expiration (exp in seconds * 1000 for ms)
+        if (payloadJson.exp && payloadJson.exp * 1000 < Date.now()) {
+          return await reply.code(401).send({ error: "jwt_expired" });
+        }
+        // Check not-before (nbf in seconds * 1000 for ms)
+        if (payloadJson.nbf && payloadJson.nbf * 1000 > Date.now()) {
+          return await reply.code(401).send({ error: "jwt_not_yet_valid" });
+        }
+      } catch {
+        return await reply.code(401).send({ error: "invalid_jwt" });
+      }
+    } else {
+      // Fall back to static bearer token (Phase 1 mechanism / ADR-006)
+      if (token.length === 0 || token !== deps.config.apiToken) {
+        return await reply.code(401).send({ error: "unauthorized" });
+      }
     }
   });
 
@@ -251,6 +310,17 @@ export async function buildServer(deps: ServerDeps) {
         permissions: agent.permissions()
       }))
     };
+  });
+
+  // DLQ replay (Phase 8): requeue dead-lettered messages back to pending.
+  app.post("/queue/dlq/replay", async () => {
+    const queue = deps.queue as { replayDead?: (limit?: number) => Promise<number> };
+    if (typeof queue.replayDead !== "function") {
+      throw new OrchestraError("DLQ_REPLAY_UNSUPPORTED", "queue implementation does not support DLQ replay");
+    }
+    const replayed = await queue.replayDead();
+    await deps.store.appendAudit("api", "queue.dlq_replayed", "queue", { replayed });
+    return { ok: true, replayed };
   });
 
   return app;

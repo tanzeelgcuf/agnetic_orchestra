@@ -1,4 +1,5 @@
 import pino from "pino";
+export * from "./tracing";
 
 export type Logger = pino.Logger;
 

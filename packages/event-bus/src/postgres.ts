@@ -19,12 +19,23 @@ interface Row {
  */
 export class PostgresQueue implements TaskQueue {
   private readonly pool: Pool;
+  private readonly maxAttempts: number;
+  private readonly baseBackoffMs: number;
+  private readonly jitterMs: number;
 
   constructor(
     databaseUrl: string,
-    private readonly maxAttempts = 5,
+    config?: { maxAttempts?: number; baseBackoffMs?: number; jitterMs?: number },
     pool?: Pool
   ) {
+    const effectiveConfig = {
+      maxAttempts: config?.maxAttempts ?? 5,
+      baseBackoffMs: config?.baseBackoffMs ?? 1_000,
+      jitterMs: config?.jitterMs ?? 200
+    };
+    this.maxAttempts = effectiveConfig.maxAttempts;
+    this.baseBackoffMs = effectiveConfig.baseBackoffMs;
+    this.jitterMs = effectiveConfig.jitterMs;
     this.pool = pool ?? new Pool({ connectionString: databaseUrl });
   }
 
@@ -72,9 +83,16 @@ export class PostgresQueue implements TaskQueue {
     );
   }
 
-  async fail(msg: ClaimedMessage, error: unknown, backoffMs: number): Promise<"retry" | "dead"> {
+  async fail(msg: ClaimedMessage, error: unknown, _rawBackoffMs?: number): Promise<"retry" | "dead"> {
     const message = error instanceof Error ? error.message : String(error);
-    if (msg.attempts >= msg.maxAttempts) {
+    const attempts = msg.attempts + 1;
+
+    // Calculate backoff: BASE * 2^(attempts-1) + jitter
+    const baseBackoff = this.baseBackoffMs * 2 ** (attempts - 1);
+    const jitter = Math.floor(Math.random() * (2 * this.jitterMs + 1)) - this.jitterMs;
+    const backoffMs = baseBackoff + jitter;
+
+    if (attempts >= this.maxAttempts) {
       await this.pool.query(
         "UPDATE queue_messages SET status = 'dead', last_error = $2 WHERE id = $1",
         [msg.id, message]
@@ -108,6 +126,26 @@ export class PostgresQueue implements TaskQueue {
       []
     );
     return Number(result.rows[0]?.count ?? "0");
+  }
+
+  /** DLQ replay (Phase 8): requeue dead messages back to pending. */
+  async replayDead(limit = 100): Promise<number> {
+    const result = await this.pool.query(
+      `UPDATE queue_messages
+       SET status = 'pending',
+           attempts = 0,
+           available_at = now(),
+           last_error = NULL
+       WHERE id IN (
+         SELECT id FROM queue_messages
+         WHERE status = 'dead'
+         ORDER BY created_at
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED
+       )`,
+      [limit]
+    );
+    return result.rowCount ?? 0;
   }
 
   async close(): Promise<void> {

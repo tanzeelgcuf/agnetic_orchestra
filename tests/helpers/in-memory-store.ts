@@ -201,7 +201,13 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     resource: string,
     data?: Record<string, unknown>
   ): Promise<void> {
-    this.auditRows.push({ actor, action, resource, data });
+    try {
+      this.auditRows.push({ actor, action, resource, data });
+    } catch (e) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('Failed to append audit log', { actor, action, resource, error: (e as Error).message });
+      }
+    }
   }
 
   async updateRunContext(runId: string, patch: Record<string, unknown>): Promise<void> {

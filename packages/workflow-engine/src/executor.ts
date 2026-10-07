@@ -422,6 +422,11 @@ export class WorkflowExecutor {
     // agent-reported failure, input validation) counts against max_attempts.
     const attempts = stageRun.attempts + 1;
     await store.updateStageRun(stageRun.id, { attempts });
+    await store.appendAudit("workflow-engine", "stage.failed", `workflow_run/${run.id}`, {
+      stageId: stage.id,
+      attempts,
+      error: message
+    });
 
     // Rework edge (§49 fix-iterate): a stage with rework_to skips stage-level
     // retries — its failure re-runs the rework target's subtree, bounded by
@@ -474,6 +479,9 @@ export class WorkflowExecutor {
       type: "workflow.failed",
       runId: run.id,
       data: { reason }
+    });
+    await this.deps.store.appendAudit("workflow-engine", "workflow.failed", `workflow_run/${run.id}`, {
+      reason
     });
     this.deps.logger.error({ runId: run.id, reason }, "workflow failed");
   }

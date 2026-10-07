@@ -40,7 +40,8 @@ export function dedupeFindings(findings: Finding[]): Finding[] {
 }
 
 /** Parse an LLM review response into findings; unparseable output → []. */
-export function parseReviewFindings(raw: string, source: string, domain: string): Finding[] {
+export function parseReviewFindings(raw: string | undefined, source: string, domain: string): Finding[] {
+  if (!raw) return [];
   const start = raw.indexOf("[");
   const end = raw.lastIndexOf("]");
   if (start < 0 || end <= start) return [];
@@ -356,11 +357,12 @@ export abstract class BaseReviewAgent implements Agent {
 
     let llmFindings: Finding[] = [];
     if (this.deps.llm) {
-      const raw = await this.deps.llm.complete({
+      const { text: raw, usage } = await this.deps.llm.complete({
         system: this.systemPrompt,
         user: [UNTRUSTED_WARNING, "", `Changed files: ${changedFiles(diff).join(", ") || "(none)"}`, "", `Requirement context: ${requirementSummary}`, "", "Diff:", diff].join("\n")
       });
       llmFindings = parseReviewFindings(raw, this.agentId, this.domain);
+      if (usage) ctx.logger?.info({ promptTokens: usage.promptTokens, completionTokens: usage.completionTokens }, "llm token usage");
     }
 
     const findings = dedupeFindings([...builtin, ...externalFindings, ...llmFindings]);
